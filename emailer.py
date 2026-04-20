@@ -6,11 +6,9 @@ from __future__ import annotations
 
 import logging
 import os
-import smtplib
+import requests
 from collections import defaultdict
 from datetime import date, timedelta
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
 
 from dotenv import load_dotenv
 
@@ -19,9 +17,9 @@ import database as db
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-GMAIL_USER = os.getenv("GMAIL_USER", "")
-GMAIL_APP_PASSWORD = os.getenv("GMAIL_APP_PASSWORD", "")
+EMAIL_FROM = os.getenv("GMAIL_USER", "")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "NCAA Player Tracker")
+SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
 
 
 # ---------------------------------------------------------------------------
@@ -37,7 +35,7 @@ def _format_hitter_line(stats: dict) -> str:
     rbi = stats.get("rbi", 0)
     bb = stats.get("bb", 0)
     k = stats.get("k", 0)
-    return f"{ab}-for-{h}, {hr} HR, {r} R, {rbi} RBI, {bb} BB, {k} K"
+    return f"{h}-for-{ab}, {hr} HR, {r} R, {rbi} RBI, {bb} BB, {k} K"
 
 
 def _format_pitcher_line(stats: dict) -> str:
@@ -140,24 +138,31 @@ def build_html_email_body(agent_name: str, player_rows: list[dict], report_date:
 
 
 def _send_email(to_email: str, subject: str, plain_body: str, html_body: str):
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
-        raise RuntimeError(
-            "GMAIL_USER and GMAIL_APP_PASSWORD must be set in .env"
-        )
+    if not SENDGRID_API_KEY:
+        raise RuntimeError("SENDGRID_API_KEY must be set in environment variables")
+    if not EMAIL_FROM:
+        raise RuntimeError("GMAIL_USER must be set in environment variables")
 
-    msg = MIMEMultipart("alternative")
-    msg["Subject"] = subject
-    msg["From"] = f"{EMAIL_FROM_NAME} <{GMAIL_USER}>"
-    msg["To"] = to_email
-
-    msg.attach(MIMEText(plain_body, "plain"))
-    msg.attach(MIMEText(html_body, "html"))
-
-    with smtplib.SMTP_SSL("smtp.gmail.com", 465) as server:
-        server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-        server.sendmail(GMAIL_USER, to_email, msg.as_string())
-
-    logger.info("Email sent to %s", to_email)
+    payload = {
+        "personalizations": [{"to": [{"email": to_email}]}],
+        "from": {"email": EMAIL_FROM, "name": EMAIL_FROM_NAME},
+        "subject": subject,
+        "content": [
+            {"type": "text/plain", "value": plain_body},
+            {"type": "text/html", "value": html_body},
+        ],
+    }
+    response = requests.post(
+        "https://api.sendgrid.com/v3/mail/send",
+        headers={
+            "Authorization": f"Bearer {SENDGRID_API_KEY}",
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=30,
+    )
+    response.raise_for_status()
+    logger.info("Email sent to %s via SendGrid", to_email)
 
 
 # ---------------------------------------------------------------------------
