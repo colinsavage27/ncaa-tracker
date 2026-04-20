@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}NCAA Player Tracker{% endblock %}</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f5f7fa;
+      color: #222;
+      margin: 0;
+      padding: 0;
+    }
+    nav {
+      background: #1a3a5c;
+      color: #fff;
+      padding: 0 24px;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      height: 52px;
+    }
+    nav .brand { font-weight: 700; font-size: 17px; letter-spacing: .3px; color: #fff; text-decoration: none; }
+    nav a { color: #cde; text-decoration: none; font-size: 14px; }
+    nav a:hover { color: #fff; }
+    .container { max-width: 960px; margin: 32px auto; padding: 0 20px; }
+    h1 { font-size: 22px; margin: 0 0 20px; }
+    h2 { font-size: 17px; margin: 24px 0 12px; color: #1a3a5c; }
+    .card {
+      background: #fff;
+      border: 1px solid #dde3ec;
+      border-radius: 8px;
+      padding: 20px 24px;
+      margin-bottom: 20px;
+    }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; }
+    th { text-align: left; padding: 8px 10px; background: #f0f4f9; color: #445; border-bottom: 2px solid #dde3ec; }
+    td { padding: 8px 10px; border-bottom: 1px solid #eef0f4; }
+    tr:last-child td { border-bottom: none; }
+    input[type=text], input[type=email], select {
+      width: 100%; padding: 8px 10px; border: 1px solid #ccd3de;
+      border-radius: 5px; font-size: 14px; background: #fff;
+    }
+    input[type=text]:focus, input[type=email]:focus, select:focus {
+      outline: none; border-color: #1a3a5c;
+    }
+    .btn {
+      display: inline-block; padding: 7px 16px; border-radius: 5px;
+      border: none; cursor: pointer; font-size: 13px; font-weight: 600;
+      text-decoration: none;
+    }
+    .btn-primary { background: #1a3a5c; color: #fff; }
+    .btn-primary:hover { background: #245080; }
+    .btn-danger { background: #c0392b; color: #fff; }
+    .btn-danger:hover { background: #e74c3c; }
+    .btn-sm { padding: 4px 10px; font-size: 12px; }
+    .badge {
+      display: inline-block; padding: 2px 8px; border-radius: 12px;
+      font-size: 11px; font-weight: 600; text-transform: uppercase;
+    }
+    .badge-hitter { background: #d4edda; color: #155724; }
+    .badge-pitcher { background: #cce5ff; color: #004085; }
+    .flash-list { list-style: none; padding: 0; margin: 0 0 16px; }
+    .flash-list li {
+      padding: 10px 16px; border-radius: 6px; margin-bottom: 8px; font-size: 14px;
+    }
+    .flash-success { background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+    .flash-error   { background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 14px; }
+    .form-row.three { grid-template-columns: 1fr 1fr 1fr; }
+    .form-group { display: flex; flex-direction: column; gap: 5px; }
+    label { font-size: 13px; font-weight: 600; color: #445; }
+    .section-header {
+      display: flex; justify-content: space-between; align-items: center;
+      border-bottom: 2px solid #1a3a5c; padding-bottom: 8px; margin-bottom: 16px;
+    }
+    .empty-state { color: #888; font-size: 14px; padding: 12px 0; }
+  </style>
+</head>
+<body>
+<nav>
+  <a href="/" class="brand">NCAA Player Tracker</a>
+  <a href="/">Roster</a>
+  <a href="/agents">Agents</a>
+  <a href="/players">Players</a>
+  <a href="/logs">Game Logs</a>
+</nav>
+<div class="container">
+  {% with messages = get_flashed_messages(with_categories=true) %}
+    {% if messages %}
+      <ul class="flash-list">
+        {% for category, message in messages %}
+          <li class="flash-{{ category }}">{{ message }}</li>
+        {% endfor %}
+      </ul>
+    {% endif %}
+  {% endwith %}
+  {% block content %}{% endblock %}
+</div>
+</body>
+</html>

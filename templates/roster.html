@@ -1,0 +1,69 @@
+{% extends "base.html" %}
+{% block title %}Roster — NCAA Player Tracker{% endblock %}
+{% block content %}
+<div class="section-header">
+  <h1>Current Roster</h1>
+  <a href="/players/add" class="btn btn-primary">+ Add Player</a>
+</div>
+
+{% if not agents %}
+  <div class="card">
+    <p class="empty-state">No agents yet. <a href="/agents">Add an agent</a> to get started.</p>
+  </div>
+{% endif %}
+
+{% for agent in agents %}
+  <div class="card">
+    <h2 style="margin-top:0;">
+      {{ agent.name }}
+      <span style="font-weight:400; color:#666; font-size:13px;">— {{ agent.email }}</span>
+    </h2>
+    {% set players = player_map[agent.id] %}
+    {% if players %}
+      <table>
+        <thead>
+          <tr>
+            <th>Name</th>
+            <th>School</th>
+            <th>Position</th>
+            <th>NCAA Player ID</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for p in players %}
+          <tr>
+            <td><strong>{{ p.name }}</strong></td>
+            <td>{{ p.school }}</td>
+            <td><span class="badge badge-{{ p.position }}">{{ p.position }}</span></td>
+            <td style="font-family:monospace; font-size:12px; color:#555;">{{ p.ncaa_player_id or '—' }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="empty-state">No players assigned to this agent.</p>
+    {% endif %}
+  </div>
+{% endfor %}
+
+{% if unassigned %}
+  <div class="card" style="border-color:#f0a500;">
+    <h2 style="margin-top:0; color:#8a6000;">Unassigned Players</h2>
+    <table>
+      <thead>
+        <tr><th>Name</th><th>School</th><th>Position</th><th>Action</th></tr>
+      </thead>
+      <tbody>
+        {% for p in unassigned %}
+        <tr>
+          <td>{{ p.name }}</td>
+          <td>{{ p.school }}</td>
+          <td><span class="badge badge-{{ p.position }}">{{ p.position }}</span></td>
+          <td><a href="/players" class="btn btn-sm btn-primary">Assign</a></td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
+{% endblock %}

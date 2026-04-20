@@ -1,0 +1,61 @@
+{% extends "base.html" %}
+{% block title %}Players — NCAA Player Tracker{% endblock %}
+{% block content %}
+<div class="section-header">
+  <h1>Players</h1>
+  <a href="/players/add" class="btn btn-primary">+ Add Player</a>
+</div>
+
+<div class="card">
+  <h2 style="margin-top:0;">All Players ({{ players|length }})</h2>
+  {% if players %}
+    <table>
+      <thead>
+        <tr>
+          <th>Name</th>
+          <th>School</th>
+          <th>Position</th>
+          <th>NCAA Player ID</th>
+          <th>Assigned Agent</th>
+          <th>Reassign</th>
+          <th style="width:80px;">Remove</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in players %}
+        <tr>
+          <td><strong>{{ p.name }}</strong></td>
+          <td>{{ p.school }}</td>
+          <td><span class="badge badge-{{ p.position }}">{{ p.position }}</span></td>
+          <td style="font-family:monospace; font-size:12px; color:#555;">
+            {{ p.ncaa_player_id or '—' }}
+          </td>
+          <td>{{ p.agent_name or '<span style="color:#999;">Unassigned</span>' | safe }}</td>
+          <td>
+            <form method="POST" action="/players/assign/{{ p.id }}" style="display:flex; gap:6px; align-items:center;">
+              <select name="assigned_agent_id" style="width:auto; min-width:130px;">
+                <option value="">— Unassigned —</option>
+                {% for a in agents %}
+                  <option value="{{ a.id }}" {% if p.assigned_agent_id == a.id %}selected{% endif %}>
+                    {{ a.name }}
+                  </option>
+                {% endfor %}
+              </select>
+              <button type="submit" class="btn btn-primary btn-sm">Save</button>
+            </form>
+          </td>
+          <td>
+            <form method="POST" action="/players/remove/{{ p.id }}"
+                  onsubmit="return confirm('Remove {{ p.name }} from the roster?')">
+              <button type="submit" class="btn btn-danger btn-sm">Remove</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% else %}
+    <p class="empty-state">No players yet. <a href="/players/add">Add a player</a> to get started.</p>
+  {% endif %}
+</div>
+{% endblock %}
