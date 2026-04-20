@@ -365,6 +365,17 @@ def add_manual_log():
     return redirect(url_for("logs"))
 
 
+@app.route("/admin/run-now", methods=["POST"])
+def admin_run_now():
+    """Trigger the nightly scrape+email job immediately."""
+    import threading
+    from scheduler import run_nightly_job
+    t = threading.Thread(target=run_nightly_job, daemon=True)
+    t.start()
+    flash("Nightly job triggered — scraping and emailing now. Check back in 1–2 minutes.", "success")
+    return redirect(url_for("logs"))
+
+
 @app.route("/logs/delete/<int:log_id>", methods=["POST"])
 def delete_log(log_id: int):
     with db.get_conn() as conn:

@@ -6,6 +6,17 @@
   <span style="font-size:13px; color:#666;">{{ logs|length }} entries</span>
 </div>
 
+<!-- Run Now card -->
+<div class="card" style="border-color:#27ae60;">
+  <h2 style="margin-top:0;">Send Test Email Now</h2>
+  <p style="font-size:13px; color:#555; margin-top:-8px; margin-bottom:14px;">
+    Scrape all players right now and send emails to their assigned agents.
+  </p>
+  <form method="POST" action="/admin/run-now">
+    <button type="submit" class="btn btn-primary">Run Nightly Job Now</button>
+  </form>
+</div>
+
 <!-- Manual entry card -->
 <div class="card" style="border-color:#1a3a5c;">
   <h2 style="margin-top:0;">Manual Stat Entry</h2>
