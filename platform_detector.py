@@ -515,6 +515,30 @@ def _name_to_slug(name: str) -> str:
     return s
 
 
+def search_ncaa_player_id(name: str, school: str) -> Optional[str]:
+    """
+    Search DuckDuckGo for a player's stats.ncaa.org player ID.
+    Returns the numeric player ID string or None if not found.
+    """
+    for query in [
+        f'site:stats.ncaa.org "{name}" baseball',
+        f'site:stats.ncaa.org {name} {school} baseball',
+    ]:
+        ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+        try:
+            resp = _fetch(ddg_url, timeout=15)
+            html = resp.text
+            pattern = re.compile(r'stats\.ncaa\.org/players/(\d+)', re.IGNORECASE)
+            matches = pattern.findall(html)
+            if matches:
+                logger.info("Found NCAA player ID %s for %s via search", matches[0], name)
+                return matches[0]
+        except Exception as exc:
+            logger.warning("NCAA player ID search failed for %s: %s", name, exc)
+    logger.info("Could not find NCAA player ID for %s at %s", name, school)
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Main auto-detect pipeline
 # ---------------------------------------------------------------------------

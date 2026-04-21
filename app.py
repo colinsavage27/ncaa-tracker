@@ -94,6 +94,19 @@ def _extract_ncaa_ids(url_or_id: str) -> tuple[str, str]:
     return url_or_id, ""
 
 
+def _background_ncaa_lookup(player_id: int, name: str, school: str):
+    """Background thread: find NCAA player ID via search and store it."""
+    try:
+        ncaa_id = pd.search_ncaa_player_id(name, school)
+        if ncaa_id:
+            db.update_player_ncaa_id(player_id, ncaa_id)
+            logger.info("Background NCAA ID lookup: found %s for %s", ncaa_id, name)
+        else:
+            logger.info("Background NCAA ID lookup: no ID found for %s", name)
+    except Exception as exc:
+        logger.warning("Background NCAA ID lookup failed for %s: %s", name, exc)
+
+
 # ---------------------------------------------------------------------------
 # Routes — Roster
 # ---------------------------------------------------------------------------
@@ -211,7 +224,7 @@ def add_player():
         if ncaa_url:
             ncaa_player_id, ncaa_team_id = _extract_ncaa_ids(ncaa_url)
             try:
-                db.add_player(
+                player_db_id = db.add_player(
                     name=name,
                     school=school,
                     ncaa_player_id=ncaa_player_id,
@@ -220,6 +233,8 @@ def add_player():
                     assigned_agent_id=assigned_agent_id,
                     source="ncaa",
                 )
+                _t = threading.Thread(target=_background_ncaa_lookup, args=(player_db_id, name, school), daemon=True)
+                _t.start()
                 flash(f"Player '{name}' added with NCAA scraper.", "success")
                 return redirect(url_for("players"))
             except Exception as exc:
@@ -241,7 +256,7 @@ def add_player():
 
         if detection.source in ("sidearm", "sidearm_legacy") and detection.player_url:
             try:
-                db.add_player(
+                player_db_id = db.add_player(
                     name=name,
                     school=school,
                     ncaa_player_id="",
@@ -251,6 +266,8 @@ def add_player():
                     source="sidearm",
                     sidearm_url=detection.player_url,
                 )
+                _t = threading.Thread(target=_background_ncaa_lookup, args=(player_db_id, name, school), daemon=True)
+                _t.start()
                 flash(
                     f"Player '{name}' added with Sidearm scraper. "
                     f"Roster URL: {detection.player_url}",
@@ -304,6 +321,41 @@ def assign_player(player_id: int):
     agent_id = int(agent_id_raw) if agent_id_raw.isdigit() else None
     db.update_player_agent(player_id, agent_id)
     flash("Assignment updated.", "success")
+    return redirect(url_for("players"))
+
+
+@app.route("/players/verify/<int:player_id>", methods=["POST"])
+def verify_player(player_id: int):
+    """Re-run NCAA ID lookup and reset scrape status to pending."""
+    player = db.get_player(player_id)
+    if not player:
+        flash("Player not found.", "error")
+        return redirect(url_for("players"))
+    db.update_player_scrape_status(player_id, "pending", "")
+    _t = threading.Thread(
+        target=_background_ncaa_lookup,
+        args=(player_id, player["name"], player["school"]),
+        daemon=True,
+    )
+    _t.start()
+    flash(f"Re-checking {player['name']} — refresh in 30 seconds to see the result.", "success")
+    return redirect(url_for("players"))
+
+
+@app.route("/players/set-ncaa-id/<int:player_id>", methods=["POST"])
+def set_ncaa_id(player_id: int):
+    """Manually set a player's NCAA stats player ID."""
+    player = db.get_player(player_id)
+    if not player:
+        flash("Player not found.", "error")
+        return redirect(url_for("players"))
+    ncaa_id = request.form.get("ncaa_player_id", "").strip()
+    if not ncaa_id.isdigit():
+        flash("Please enter a valid numeric NCAA player ID.", "error")
+        return redirect(url_for("players"))
+    db.update_player_ncaa_id(player_id, ncaa_id)
+    db.update_player_scrape_status(player_id, "pending", "")
+    flash(f"NCAA ID saved for {player['name']}. Will verify on next scrape run.", "success")
     return redirect(url_for("players"))
 
 

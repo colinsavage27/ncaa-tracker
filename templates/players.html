@@ -15,7 +15,7 @@
           <th>Name</th>
           <th>School</th>
           <th>Position</th>
-          <th>NCAA Player ID</th>
+          <th>Scrape Status</th>
           <th>Assigned Agent</th>
           <th>Reassign</th>
           <th style="width:80px;">Remove</th>
@@ -27,8 +27,35 @@
           <td><strong>{{ p.name }}</strong></td>
           <td>{{ p.school }}</td>
           <td><span class="badge badge-{{ p.position }}">{{ p.position }}</span></td>
-          <td style="font-family:monospace; font-size:12px; color:#555;">
-            {{ p.ncaa_player_id or '—' }}
+          <td>
+            {% set status = p.get('scrape_status', 'pending') %}
+            {% if status == 'verified' %}
+              <span style="color:#27ae60; font-weight:600;">✓ Verified</span>
+            {% elif status == 'failed' %}
+              <span style="color:#e74c3c; font-weight:600;">✗ Failed</span>
+              <details style="margin-top:6px;">
+                <summary style="cursor:pointer; font-size:12px; color:#e74c3c; font-weight:600;">▶ Fix this player</summary>
+                <div style="margin-top:8px; padding:12px; background:#fff5f5; border:1px solid #fcc; border-radius:6px; font-size:13px;">
+                  <p style="margin:0 0 10px 0;"><strong>Option 1 — Try automatically:</strong></p>
+                  <form method="POST" action="/players/verify/{{ p.id }}" style="margin-bottom:14px;">
+                    <button type="submit" class="btn btn-primary btn-sm">Re-check automatically</button>
+                  </form>
+                  <p style="margin:0 0 6px 0;"><strong>Option 2 — Enter manually:</strong><br>
+                  Go to <a href="https://stats.ncaa.org" target="_blank">stats.ncaa.org</a>, search for <strong>{{ p.name }}</strong>,
+                  open their profile, and copy the number at the end of the URL.<br>
+                  <span style="color:#888; font-size:12px;">Example: stats.ncaa.org/players/<strong>6152438</strong> → enter <strong>6152438</strong></span></p>
+                  <form method="POST" action="/players/set-ncaa-id/{{ p.id }}" style="display:flex; gap:6px; align-items:center; margin-top:8px;">
+                    <input type="text" name="ncaa_player_id" placeholder="NCAA player ID" style="width:140px;">
+                    <button type="submit" class="btn btn-primary btn-sm">Save &amp; Retry</button>
+                  </form>
+                </div>
+              </details>
+            {% else %}
+              <span style="color:#e67e22; font-weight:600;">⏳ Pending</span>
+              <form method="POST" action="/players/verify/{{ p.id }}" style="display:inline; margin-left:6px;">
+                <button type="submit" class="btn btn-sm" style="font-size:11px; padding:2px 8px; background:#f0f0f0; border:1px solid #ccc; border-radius:3px; cursor:pointer;">Check now</button>
+              </form>
+            {% endif %}
           </td>
           <td>{{ p.agent_name or '<span style="color:#999;">Unassigned</span>' | safe }}</td>
           <td>

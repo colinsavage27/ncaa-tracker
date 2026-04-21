@@ -62,6 +62,8 @@ def init_db():
         for col, definition in [
             ("source", "TEXT NOT NULL DEFAULT 'ncaa'"),
             ("sidearm_schedule_url", "TEXT"),
+            ("scrape_status", "TEXT NOT NULL DEFAULT 'pending'"),
+            ("scrape_error", "TEXT DEFAULT ''"),
         ]:
             try:
                 conn.execute(f"ALTER TABLE players ADD COLUMN {col} {definition}")
@@ -163,6 +165,21 @@ def update_player_agent(player_id: int, agent_id: int | None):
         conn.execute(
             "UPDATE players SET assigned_agent_id = ? WHERE id = ?",
             (agent_id, player_id),
+        )
+
+
+def update_player_scrape_status(player_id: int, status: str, error: str = ""):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET scrape_status = ?, scrape_error = ? WHERE id = ?",
+            (status, error or "", player_id),
+        )
+
+def update_player_ncaa_id(player_id: int, ncaa_player_id: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET ncaa_player_id = ? WHERE id = ?",
+            (ncaa_player_id, player_id),
         )
 
 

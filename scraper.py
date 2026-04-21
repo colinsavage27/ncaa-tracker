@@ -898,10 +898,49 @@ def get_scraper(source: str = "ncaa") -> BasePlayerScraper:
 # ---------------------------------------------------------------------------
 
 
+def _scrape_player_with_fallback(player: dict) -> tuple[Optional[dict], str]:
+    """
+    Try primary scraper, fall back to NCAA via ScraperAPI if it fails.
+    Returns (stats_or_None, error_message).
+    """
+    source = player.get("source", "ncaa")
+    name = player["name"]
+    school = player["school"]
+    ncaa_id = player.get("ncaa_player_id", "")
+
+    # Try primary scraper
+    primary_error = ""
+    try:
+        scraper = get_scraper(source)
+        logger.info("Scraping %s [%s] via %s ...", name, school, scraper.source_name)
+        stats = scraper.fetch_latest_game(player)
+        if stats is not None:
+            return stats, ""
+    except ValueError:
+        primary_error = f"No scraper for source '{source}'"
+        logger.error(primary_error + " (player: %s)", name)
+    except Exception as exc:
+        primary_error = str(exc)
+        logger.error("Primary scraper error for %s: %s", name, exc)
+
+    # Fall back to NCAA scraper if we have a player ID and primary source is not NCAA
+    if ncaa_id and source != "ncaa":
+        logger.info("Trying NCAA fallback for %s (id=%s)", name, ncaa_id)
+        try:
+            stats = NCAAScraper().fetch_latest_game(player)
+            if stats is not None:
+                return stats, ""
+        except Exception as exc:
+            logger.error("NCAA fallback also failed for %s: %s", name, exc)
+            return None, f"Primary: {primary_error or 'no game'} | NCAA fallback: {exc}"
+
+    return None, primary_error
+
+
 def scrape_all_players() -> int:
     """
     Scrape the latest game for every player in the DB.
-    Writes results to games_log.
+    Writes results to games_log. Updates scrape_status on persistent failures.
     Returns the number of new game entries saved.
     """
     players = db.get_all_players()
@@ -911,30 +950,19 @@ def scrape_all_players() -> int:
 
     saved = 0
     for player in players:
-        source = player.get("source", "ncaa")
-        try:
-            scraper = get_scraper(source)
-        except ValueError:
-            logger.error("No scraper for source '%s' (player: %s)", source, player["name"])
-            continue
-
-        logger.info(
-            "Scraping %s [%s] via %s ...",
-            player["name"],
-            player["school"],
-            scraper.source_name,
-        )
-
-        stats = scraper.fetch_latest_game(player)
+        stats, error = _scrape_player_with_fallback(player)
         if stats is None:
-            logger.info("  -> No game to report for %s", player["name"])
+            if error:
+                db.update_player_scrape_status(player["id"], "failed", error)
+                logger.info("  -> Scrape failed for %s: %s", player["name"], error)
+            else:
+                logger.info("  -> No game to report for %s", player["name"])
             continue
 
         game_date = stats.get("game_date", date.today().isoformat())
         db.upsert_game_log(player["id"], game_date, stats)
-        logger.info(
-            "  -> Saved stats for %s on %s", player["name"], game_date
-        )
+        db.update_player_scrape_status(player["id"], "verified", "")
+        logger.info("  -> Saved stats for %s on %s", player["name"], game_date)
         saved += 1
 
     logger.info("Scraping complete. %d new/updated game entries saved.", saved)
