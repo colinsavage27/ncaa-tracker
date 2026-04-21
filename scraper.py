@@ -71,45 +71,54 @@ def _scraperapi_url(target_url: str, **extra_params) -> str:
     """
     params = {
         "api_key": SCRAPERAPI_KEY,
-        "render": "true",
         "url": target_url,
     }
     if SCRAPERAPI_ULTRA:
         params["ultra_premium"] = "true"
-    params.update(extra_params)
+    params.update(extra_params)  # caller controls render=true/false per attempt
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
 
 
-# Each retry uses a different set of ScraperAPI params so Akamai sees a
-# different fingerprint / proxy pool on every attempt.
-# Attempt 0 — baseline ultra premium
-# Attempt 1 — force US residential IPs  (different proxy pool)
-# Attempt 2 — US residential + mobile Chrome UA  (different device fingerprint)
-# Attempt 3 — US residential + mobile + randomised session  (fresh sticky IP)
+# Retry escalation strategy for Akamai-protected NCAA pages.
+#
+# stats.ncaa.org is server-rendered PHP — the full HTML (including the game
+# log table) is in the initial HTTP response.  JavaScript rendering (headless
+# Chrome) is NOT required to get the data, and its fingerprint is exactly what
+# Akamai is trained to detect and block.
+#
+# So we try render=false first: a plain proxied HTTP request with no Chrome.
+# Akamai can't fingerprint what isn't there.  If it blocks us anyway (empty
+# page / 500), we escalate to render=true on subsequent attempts.
+#
+# Attempt 0 — render=false, no Chrome  (fast, undetectable, ~2s)
+# Attempt 1 — render=true, standard ultra premium  (headless Chrome fallback)
+# Attempt 2 — render=true, US residential proxy    (different proxy pool)
+# Attempt 3 — render=true, US residential, mobile UA  (different fingerprint)
 _SCRAPERAPI_RETRY_PARAMS: list[dict] = [
-    {},
-    {"country_code": "us"},
-    {"country_code": "us", "device_type": "mobile"},
-    {"country_code": "us", "device_type": "mobile",
-     "session_number": str(__import__("random").randint(0, 9999))},
+    {"render": "false"},
+    {"render": "true"},
+    {"render": "true", "country_code": "us"},
+    {"render": "true", "country_code": "us", "device_type": "mobile"},
 ]
 
 
 def _get(url: str, retries: int = 3, **kwargs):
-    """Fetch url via ScraperAPI (if key configured) or directly.
-    Retries up to `retries` times on 500 errors.
-    Each retry uses different ScraperAPI params so Akamai sees a fresh fingerprint."""
+    """Fetch url, escalating through ScraperAPI strategies on each 500 or empty page.
+
+    Attempt 0 is render=false (no headless Chrome — avoids Akamai fingerprint).
+    Subsequent attempts escalate to render=true with varying proxy params.
+    """
     if REQUEST_DELAY:
         time.sleep(REQUEST_DELAY)
 
-    _RETRY_WAITS = [6, 10, 16, 25]  # seconds before each retry attempt
+    _RETRY_WAITS = [6, 10, 16, 25]
     last_exc = None
     for attempt in range(1 + retries):
         if SCRAPERAPI_KEY:
             extra = _SCRAPERAPI_RETRY_PARAMS[min(attempt, len(_SCRAPERAPI_RETRY_PARAMS) - 1)]
             fetch_url = _scraperapi_url(url, **extra)
             if attempt > 0:
-                logger.info("ScraperAPI retry %d — params: %s", attempt, extra)
+                logger.info("ScraperAPI retry %d with params %s", attempt, extra)
         else:
             if attempt == 0:
                 logger.warning(
