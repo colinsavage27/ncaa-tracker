@@ -75,9 +75,10 @@ def _scraperapi_url(target_url: str) -> str:
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
 
 
-def _get(url: str, retries: int = 2, **kwargs):
+def _get(url: str, retries: int = 4, **kwargs):
     """Fetch url via ScraperAPI (if key configured) or directly.
-    Retries up to `retries` times on 500 errors (ScraperAPI transient failures)."""
+    Retries up to `retries` times on 500 errors (ScraperAPI transient failures).
+    Uses progressively longer waits: 15s, 30s, 45s, 60s."""
     time.sleep(REQUEST_DELAY)
     if SCRAPERAPI_KEY:
         fetch_url = _scraperapi_url(url)
@@ -92,14 +93,17 @@ def _get(url: str, retries: int = 2, **kwargs):
     last_exc = None
     for attempt in range(1 + retries):
         try:
-            resp = SESSION.get(fetch_url, timeout=90, **kwargs)
+            resp = SESSION.get(fetch_url, timeout=120, **kwargs)
             resp.raise_for_status()
             return resp
         except requests.HTTPError as exc:
             last_exc = exc
             if exc.response is not None and exc.response.status_code == 500 and attempt < retries:
-                wait = 10 * (attempt + 1)
-                logger.warning("ScraperAPI 500 for %s — retrying in %ds (attempt %d/%d)", url, wait, attempt + 1, retries)
+                wait = 15 * (attempt + 1)
+                logger.warning(
+                    "ScraperAPI 500 for %s — retrying in %ds (attempt %d/%d)",
+                    url, wait, attempt + 1, retries,
+                )
                 time.sleep(wait)
                 continue
             raise
@@ -447,11 +451,24 @@ class NCAAScraper(BasePlayerScraper):
                 if has_date_opp:
                     candidates.append((t, th_texts))
 
-            # Prefer the candidate whose headers include the position-specific key
+            # Prefer the candidate whose headers include the position-specific key.
+            # NCAA pitching tables sometimes use "hb" instead of "hbp" — treat both as pitcher tables.
+            pitcher_keys = {"ip", "er"}
+            hitter_keys = {"ab", "rbi"}
             for t, th_texts in candidates:
-                if position_key in th_texts:
+                th_set = set(th_texts)
+                if position == "pitcher" and (pitcher_keys & th_set):
                     table = t
                     break
+                if position == "hitter" and (hitter_keys & th_set):
+                    table = t
+                    break
+            # Secondary pass: original single-key match
+            if table is None:
+                for t, th_texts in candidates:
+                    if position_key in th_texts:
+                        table = t
+                        break
             # Fall back to first candidate
             if table is None and candidates:
                 table = candidates[0][0]
@@ -558,7 +575,10 @@ class NCAAScraper(BasePlayerScraper):
                 "r": _safe_int(col_map.get("r", "0")),
                 "er": _safe_int(col_map.get("er", "0")),
                 "bb": _safe_int(col_map.get("bb", "0")),
-                "hbp": _safe_int(col_map.get("hbp", "0")),
+                # NCAA pitching tables use "HB" for hit-by-pitch (not "HBP")
+                "hbp": _safe_int(
+                    col_map.get("hbp", col_map.get("hb", "0"))
+                ),
                 "k": _safe_int(
                     col_map.get("so", col_map.get("k", col_map.get("ks", "0")))
                 ),
