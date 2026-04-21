@@ -407,21 +407,25 @@ def set_ncaa_id(player_id: int):
 def logs():
     recent = db.get_recent_logs(limit=200)
     all_players = db.get_all_players()
-    return render_template("logs.html", logs=recent, players=all_players)
+    all_agents = db.get_all_agents()
+    return render_template("logs.html", logs=recent, players=all_players, agents=all_agents)
 
 
-@app.route("/logs/add", methods=["POST"])
-def add_manual_log():
-    """Manually enter a box score for a player (fallback when scraper can't reach NCAA)."""
+@app.route("/logs/lookup", methods=["POST"])
+def statline_lookup():
+    """
+    Statline Lookup — scrape a player's stats for a specific date and email
+    the result immediately to the chosen agent.
+    """
+    import scraper as sc
+    from emailer import build_email_body, build_html_email_body, _send_email
+
     player_id_raw = request.form.get("player_id", "").strip()
-    game_date = request.form.get("game_date", "").strip()
-    opponent = request.form.get("opponent", "").strip()
-    result = request.form.get("result", "").strip()
-    team_score_raw = request.form.get("team_score", "0").strip()
-    opp_score_raw = request.form.get("opp_score", "0").strip()
+    agent_id_raw  = request.form.get("agent_id", "").strip()
+    game_date     = request.form.get("game_date", "").strip()
 
-    if not player_id_raw or not game_date or not opponent:
-        flash("Player, date, and opponent are required.", "error")
+    if not player_id_raw or not game_date:
+        flash("Player and date are required.", "error")
         return redirect(url_for("logs"))
 
     player = db.get_player(int(player_id_raw))
@@ -429,30 +433,65 @@ def add_manual_log():
         flash("Player not found.", "error")
         return redirect(url_for("logs"))
 
-    base = {
-        "game_date": game_date,
-        "opponent": opponent,
-        "result": result,
-        "team_name": player["school"],
-        "team_score": int(team_score_raw) if team_score_raw.isdigit() else 0,
-        "opp_score": int(opp_score_raw) if opp_score_raw.isdigit() else 0,
-        "manual": True,
+    agent = db.get_agent(int(agent_id_raw)) if agent_id_raw.isdigit() else None
+    if not agent:
+        flash("Please select an agent to send the statline to.", "error")
+        return redirect(url_for("logs"))
+
+    # Try primary scraper for that date; fall back to NCAA if we have an ID
+    source = player.get("source", "ncaa")
+    stats = None
+
+    try:
+        primary = sc.get_scraper(source)
+        if hasattr(primary, "fetch_game_for_date"):
+            stats = primary.fetch_game_for_date(player, game_date)
+    except Exception as exc:
+        logger.warning("Primary scraper lookup failed for %s: %s", player["name"], exc)
+
+    if stats is None and source != "ncaa" and player.get("ncaa_player_id"):
+        logger.info("Falling back to NCAA scraper for lookup: %s on %s", player["name"], game_date)
+        try:
+            stats = sc.NCAAScraper().fetch_game_for_date(player, game_date)
+        except Exception as exc:
+            logger.warning("NCAA fallback lookup failed for %s: %s", player["name"], exc)
+
+    if stats is None:
+        flash(
+            f"No stats found for {player['name']} on {game_date}. "
+            "The player may not have played that day, or the date is outside "
+            "the current season's game log.",
+            "error",
+        )
+        return redirect(url_for("logs"))
+
+    # Persist to logs (unsent=0 so it won't be double-sent by the nightly job)
+    log_id = db.upsert_game_log(player["id"], game_date, stats)
+    with db.get_conn() as conn:
+        conn.execute("UPDATE games_log SET sent = 1 WHERE id = ?", (log_id,))
+
+    # Build and send the email
+    player_row = {
+        "player_name": player["name"],
+        "school":      player["school"],
+        "position":    player["position"],
+        "stats":       stats,
     }
+    subject    = f"Statline Lookup — {player['name']} on {game_date}"
+    plain_body = build_email_body(agent["name"], [player_row], game_date)
+    html_body  = build_html_email_body(agent["name"], [player_row], game_date)
 
-    def _i(key): return int(request.form.get(key, "0") or "0")
-    def _f(key):
-        try: return float(request.form.get(key, "0") or "0")
-        except ValueError: return 0.0
+    try:
+        _send_email(agent["email"], subject, plain_body, html_body)
+        flash(
+            f"Statline for {player['name']} on {game_date} sent to "
+            f"{agent['name']} ({agent['email']}).",
+            "success",
+        )
+    except Exception as exc:
+        logger.error("Email send failed for statline lookup: %s", exc)
+        flash(f"Stats found but email failed: {exc}", "error")
 
-    if player["position"] == "pitcher":
-        stats = {**base, "ip": _f("ip"), "h": _i("h"), "r": _i("r"),
-                 "er": _i("er"), "bb": _i("bb"), "hbp": _i("hbp"), "k": _i("k")}
-    else:
-        stats = {**base, "ab": _i("ab"), "h": _i("h"), "hr": _i("hr"),
-                 "r": _i("r"), "rbi": _i("rbi"), "bb": _i("bb"), "k": _i("k")}
-
-    db.upsert_game_log(int(player_id_raw), game_date, stats)
-    flash(f"Stats for {player['name']} on {game_date} saved.", "success")
     return redirect(url_for("logs"))
 
 

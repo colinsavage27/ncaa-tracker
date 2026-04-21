@@ -295,7 +295,26 @@ class NCAAScraper(BasePlayerScraper):
             )
         return None
 
-    def _scrape_game_log(self, player: dict, ncaa_player_id: str) -> Optional[dict]:
+    def fetch_game_for_date(self, player: dict, target_date: str) -> Optional[dict]:
+        """
+        Fetch stats for *player* on a specific *target_date* (YYYY-MM-DD).
+        Used by the Statline Lookup feature for historical queries.
+        """
+        ncaa_player_id = player.get("ncaa_player_id")
+        if not ncaa_player_id:
+            logger.warning("Player %s has no ncaa_player_id — skipping", player["name"])
+            return None
+        try:
+            return self._scrape_game_log(player, ncaa_player_id, target_date=target_date)
+        except Exception as exc:
+            logger.exception(
+                "Error fetching stats for %s on %s: %s", player["name"], target_date, exc
+            )
+            return None
+
+    def _scrape_game_log(
+        self, player: dict, ncaa_player_id: str, target_date: Optional[str] = None
+    ) -> Optional[dict]:
         # Step 1 — Load the player profile page
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
@@ -306,7 +325,7 @@ class NCAAScraper(BasePlayerScraper):
         # stats.ncaa.org renders the full game-by-game table on the profile
         # page itself (visible in the "Game By Game" section), so we can often
         # skip the second ScraperAPI call entirely.
-        result = self._parse_most_recent_game(soup, player)
+        result = self._parse_most_recent_game(soup, player, target_date=target_date)
         if result is not None:
             logger.info("Parsed game log from profile page for %s", player["name"])
             return result
@@ -336,7 +355,7 @@ class NCAAScraper(BasePlayerScraper):
         logger.info("Fetching game log page: %s", game_log_url)
         resp = _get(game_log_url)
         soup = BeautifulSoup(resp.text, "html.parser")
-        return self._parse_most_recent_game(soup, player)
+        return self._parse_most_recent_game(soup, player, target_date=target_date)
 
     # Cache so we only spend one ScraperAPI credit discovering this per process lifetime
     _cached_ctl_id: Optional[str] = None
@@ -419,7 +438,7 @@ class NCAAScraper(BasePlayerScraper):
         return None
 
     def _parse_most_recent_game(
-        self, soup: BeautifulSoup, player: dict
+        self, soup: BeautifulSoup, player: dict, target_date: Optional[str] = None
     ) -> Optional[dict]:
         """
         Parse the game log HTML table and return stats for the most recent
@@ -507,11 +526,14 @@ class NCAAScraper(BasePlayerScraper):
         if not data_rows:
             return None
 
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        # target_date defaults to yesterday (nightly job); callers can pass a
+        # specific date for historical Statline Lookup queries.
+        if target_date is None:
+            target_date = (date.today() - timedelta(days=1)).isoformat()
 
-        # Scan backward through rows looking only for yesterday's game.
-        # Skips future/today games, unparseable dates, and totals rows.
-        # Stops as soon as it passes yesterday (player didn't play yesterday).
+        # Scan backward through rows looking for target_date.
+        # Skips future/scheduled games, unparseable dates, and totals rows.
+        # Stops as soon as it passes target_date (player didn't play that day).
         col_map = None
         for row in reversed(data_rows):
             cells = row.find_all("td")
@@ -532,23 +554,24 @@ class NCAAScraper(BasePlayerScraper):
             if not game_date_str:
                 continue  # unparseable date — skip (e.g. blank scheduled row)
 
-            if game_date_str == yesterday:
+            if game_date_str == target_date:
                 col_map = row_map
                 col_map["_game_date"] = game_date_str
                 break
 
-            if game_date_str < yesterday:
-                # Went past yesterday — player didn't play yesterday
+            if game_date_str < target_date:
+                # Went past target_date — player didn't play that day
                 logger.info(
-                    "%s last played on %s — no game to report",
+                    "%s last played on %s — no game on %s to report",
                     player["name"],
                     game_date_str,
+                    target_date,
                 )
                 return None
-            # game_date_str > yesterday (today or future) — keep scanning back
+            # game_date_str > target_date — keep scanning back
 
         if col_map is None:
-            logger.info("%s — no game found for %s", player["name"], yesterday)
+            logger.info("%s — no game found for %s", player["name"], target_date)
             return None
 
         game_date_str = col_map.pop("_game_date")
@@ -676,12 +699,24 @@ class SidearmScraper(BasePlayerScraper):
             logger.exception("debug_fetch failed: %s", exc)
             return None
 
+    def fetch_game_for_date(self, player: dict, target_date: str) -> Optional[dict]:
+        """Fetch stats for player on a specific date. Used by Statline Lookup."""
+        url = player.get("sidearm_schedule_url") or player.get("sidearm_url")
+        if not url:
+            return None
+        try:
+            return self._scrape(player, url, bypass_date_gate=False, target_date=target_date)
+        except Exception as exc:
+            logger.exception("fetch_game_for_date failed: %s", exc)
+            return None
+
     # ------------------------------------------------------------------
     # Internal implementation
     # ------------------------------------------------------------------
 
     def _scrape(
-        self, player: dict, url: str, *, bypass_date_gate: bool
+        self, player: dict, url: str, *, bypass_date_gate: bool,
+        target_date: Optional[str] = None
     ) -> Optional[dict]:
         parsed = urlparse(url)
         base_url = f"{parsed.scheme}://{parsed.netloc}"
@@ -703,11 +738,18 @@ class SidearmScraper(BasePlayerScraper):
         if stats_data is None:
             return None
 
-        # 2. Pick the most recent game entry (hitter vs pitcher)
+        # 2. Pick the game entry (most recent, or a specific date for lookups)
         position = player.get("position", "hitter")
-        game_entry = self._latest_game_entry(stats_data, position)
+        if target_date:
+            game_entry = self._game_entry_for_date(stats_data, position, target_date)
+        else:
+            game_entry = self._latest_game_entry(stats_data, position)
         if game_entry is None:
-            logger.info("No game entries in stats API response for %s", player["name"])
+            logger.info(
+                "No game entries in stats API response for %s%s",
+                player["name"],
+                f" on {target_date}" if target_date else "",
+            )
             return None
 
         # 3. Parse and gate by date
@@ -719,7 +761,7 @@ class SidearmScraper(BasePlayerScraper):
             )
             return None
 
-        if not bypass_date_gate:
+        if not bypass_date_gate and not target_date:
             yesterday = (date.today() - timedelta(days=1)).isoformat()
             today_str = date.today().isoformat()
             if game_date_str not in (yesterday, today_str):
@@ -806,6 +848,20 @@ class SidearmScraper(BasePlayerScraper):
 
         # The API returns games in chronological order; last entry is most recent
         return actual[-1]
+
+    def _game_entry_for_date(
+        self, stats_data: dict, position: str, target_date: str
+    ) -> Optional[dict]:
+        """Return the game entry matching target_date (YYYY-MM-DD), or None."""
+        current = stats_data.get("currentStats", {}) or {}
+        games = current.get("pitchingStats" if position == "pitcher" else "hittingStats") or []
+        for g in games:
+            if not g.get("date"):
+                continue
+            parsed = self._parse_stats_date(g["date"])
+            if parsed == target_date:
+                return g
+        return None
 
     @staticmethod
     def _parse_stats_date(raw: str) -> Optional[str]:

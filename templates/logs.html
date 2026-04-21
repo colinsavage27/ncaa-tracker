@@ -6,87 +6,50 @@
   <span style="font-size:13px; color:#666;">{{ logs|length }} entries</span>
 </div>
 
-<!-- Run Now card -->
+<!-- Manual Scrape card -->
 <div class="card" style="border-color:#27ae60;">
-  <h2 style="margin-top:0;">Send Test Email Now</h2>
+  <h2 style="margin-top:0;">Manual Scrape</h2>
   <p style="font-size:13px; color:#555; margin-top:-8px; margin-bottom:14px;">
     Scrape all players right now and send emails to their assigned agents.
   </p>
   <form method="POST" action="/admin/run-now">
-    <button type="submit" class="btn btn-primary">Run Nightly Job Now</button>
+    <button type="submit" class="btn btn-primary">Scrape &amp; Email Now</button>
   </form>
 </div>
 
-<!-- Manual entry card -->
+<!-- Statline Lookup card -->
 <div class="card" style="border-color:#1a3a5c;">
-  <h2 style="margin-top:0;">Manual Stat Entry</h2>
+  <h2 style="margin-top:0;">Statline Lookup</h2>
   <p style="font-size:13px; color:#555; margin-top:-8px; margin-bottom:14px;">
-    Use this form when the automatic scraper can't reach stats.ncaa.org.
-    Stats entered here are included in the next nightly email run.
+    Pull a player's box score from any date and send it directly to an agent's inbox.
+    Great for checking what a client did against a specific team or pitcher.
   </p>
-  <form method="POST" action="/logs/add" id="manual-form">
+  <form method="POST" action="/logs/lookup">
     <div class="form-row three">
       <div class="form-group">
         <label>Player *</label>
-        <select name="player_id" id="player-select" required onchange="updateFields()">
+        <select name="player_id" required>
           <option value="">— Select player —</option>
           {% for p in players %}
-            <option value="{{ p.id }}" data-pos="{{ p.position }}">{{ p.name }} ({{ p.school }})</option>
+            <option value="{{ p.id }}">{{ p.name }} ({{ p.school }})</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group">
+        <label>Send to *</label>
+        <select name="agent_id" required>
+          <option value="">— Select agent —</option>
+          {% for a in agents %}
+            <option value="{{ a.id }}">{{ a.name }} ({{ a.email }})</option>
           {% endfor %}
         </select>
       </div>
       <div class="form-group">
         <label>Game Date *</label>
-        <input type="date" name="game_date" required
-               value="{{ '' }}">
-      </div>
-      <div class="form-group">
-        <label>Opponent *</label>
-        <input type="text" name="opponent" placeholder="e.g. Stanford">
+        <input type="date" name="game_date" required>
       </div>
     </div>
-    <div class="form-row three">
-      <div class="form-group">
-        <label>Result</label>
-        <input type="text" name="result" placeholder="e.g. W 7-3">
-      </div>
-      <div class="form-group">
-        <label>Your Team Score</label>
-        <input type="number" name="team_score" value="0" min="0">
-      </div>
-      <div class="form-group">
-        <label>Opponent Score</label>
-        <input type="number" name="opp_score" value="0" min="0">
-      </div>
-    </div>
-
-    <!-- Hitter fields -->
-    <div id="hitter-fields">
-      <div class="form-row" style="grid-template-columns: repeat(7, 1fr);">
-        <div class="form-group"><label>AB</label><input type="number" name="ab" value="0" min="0"></div>
-        <div class="form-group"><label>H</label><input type="number" name="h" value="0" min="0"></div>
-        <div class="form-group"><label>HR</label><input type="number" name="hr" value="0" min="0"></div>
-        <div class="form-group"><label>R</label><input type="number" name="r" value="0" min="0"></div>
-        <div class="form-group"><label>RBI</label><input type="number" name="rbi" value="0" min="0"></div>
-        <div class="form-group"><label>BB</label><input type="number" name="bb" value="0" min="0"></div>
-        <div class="form-group"><label>K</label><input type="number" name="k" value="0" min="0"></div>
-      </div>
-    </div>
-
-    <!-- Pitcher fields -->
-    <div id="pitcher-fields" style="display:none;">
-      <div class="form-row" style="grid-template-columns: repeat(7, 1fr);">
-        <div class="form-group"><label>IP</label><input type="number" name="ip" value="0" min="0" step="0.1"></div>
-        <div class="form-group"><label>H</label><input type="number" name="h_p" value="0" min="0"></div>
-        <div class="form-group"><label>R</label><input type="number" name="r_p" value="0" min="0"></div>
-        <div class="form-group"><label>ER</label><input type="number" name="er" value="0" min="0"></div>
-        <div class="form-group"><label>BB</label><input type="number" name="bb_p" value="0" min="0"></div>
-        <div class="form-group"><label>HBP</label><input type="number" name="hbp" value="0" min="0"></div>
-        <div class="form-group"><label>K</label><input type="number" name="k_p" value="0" min="0"></div>
-      </div>
-    </div>
-
-    <button type="submit" class="btn btn-primary" style="margin-top:4px;">Save Stats</button>
+    <button type="submit" class="btn btn-primary" style="margin-top:4px;">Look Up &amp; Send</button>
   </form>
 </div>
 
@@ -151,14 +114,4 @@
     <p class="empty-state">No game log entries yet.</p>
   {% endif %}
 </div>
-
-<script>
-function updateFields() {
-  var sel = document.getElementById('player-select');
-  var opt = sel.options[sel.selectedIndex];
-  var pos = opt ? opt.dataset.pos : '';
-  document.getElementById('hitter-fields').style.display  = (pos === 'pitcher') ? 'none' : '';
-  document.getElementById('pitcher-fields').style.display = (pos === 'pitcher') ? ''     : 'none';
-}
-</script>
 {% endblock %}
