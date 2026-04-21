@@ -424,26 +424,37 @@ class NCAAScraper(BasePlayerScraper):
         table = soup.find("table", id=re.compile(r"game_log", re.I))
 
         if table is None:
+            position = player.get("position", "hitter")
+            # Position-specific column to prefer: pitchers need "ip", hitters need "ab"
+            position_key = "ip" if position == "pitcher" else "ab"
+
             all_tables = soup.find_all("table")
+            candidates = []  # tables that have date/opponent headers
+
             for t in all_tables:
-                # Check <th> elements
                 ths = t.find_all("th")
-                if any(
-                    re.search(r"\bdate\b|\bopponent\b", th.get_text(strip=True), re.I)
-                    for th in ths
-                ):
+                th_texts = [th.get_text(strip=True).lower() for th in ths]
+                has_date_opp = any(re.search(r"\bdate\b|\bopponent\b", h) for h in th_texts)
+
+                if not has_date_opp:
+                    # Also check first-row <td>s (some tables use td for headers)
+                    first_row = t.find("tr")
+                    if first_row:
+                        td_texts = [td.get_text(strip=True).lower() for td in first_row.find_all("td")]
+                        has_date_opp = any(re.search(r"\bdate\b|\bopponent\b", h) for h in td_texts)
+                        th_texts = th_texts or td_texts
+
+                if has_date_opp:
+                    candidates.append((t, th_texts))
+
+            # Prefer the candidate whose headers include the position-specific key
+            for t, th_texts in candidates:
+                if position_key in th_texts:
                     table = t
                     break
-                # Some NCAA tables use <td> for headers in the first row
-                first_row = t.find("tr")
-                if first_row:
-                    tds = first_row.find_all("td")
-                    if any(
-                        re.search(r"\bdate\b|\bopponent\b", td.get_text(strip=True), re.I)
-                        for td in tds
-                    ):
-                        table = t
-                        break
+            # Fall back to first candidate
+            if table is None and candidates:
+                table = candidates[0][0]
 
         if table is None:
             all_tables = soup.find_all("table")
@@ -480,11 +491,10 @@ class NCAAScraper(BasePlayerScraper):
             return None
 
         yesterday = (date.today() - timedelta(days=1)).isoformat()
-        today = date.today().isoformat()
 
-        # Scan backward through rows to find yesterday's (or today's) game.
-        # We skip future scheduled games (dates in the future), rows with
-        # unparseable dates, and totals rows.
+        # Scan backward through rows looking only for yesterday's game.
+        # Skips future/today games, unparseable dates, and totals rows.
+        # Stops as soon as it passes yesterday (player didn't play yesterday).
         col_map = None
         for row in reversed(data_rows):
             cells = row.find_all("td")
@@ -503,24 +513,25 @@ class NCAAScraper(BasePlayerScraper):
             raw_date = row_map.get("date", "")
             game_date_str = _normalize_ncaa_date(raw_date)
             if not game_date_str:
-                continue  # unparseable (e.g. blank scheduled row) — try earlier row
+                continue  # unparseable date — skip (e.g. blank scheduled row)
 
-            if game_date_str in (yesterday, today):
+            if game_date_str == yesterday:
                 col_map = row_map
                 col_map["_game_date"] = game_date_str
                 break
 
-            # Past the target date range — no point going further back
             if game_date_str < yesterday:
+                # Went past yesterday — player didn't play yesterday
                 logger.info(
                     "%s last played on %s — no game to report",
                     player["name"],
                     game_date_str,
                 )
                 return None
+            # game_date_str > yesterday (today or future) — keep scanning back
 
         if col_map is None:
-            logger.info("%s — no game found for %s or %s", player["name"], yesterday, today)
+            logger.info("%s — no game found for %s", player["name"], yesterday)
             return None
 
         game_date_str = col_map.pop("_game_date")
