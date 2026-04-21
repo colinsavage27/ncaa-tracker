@@ -204,11 +204,12 @@ def _parse_result(result_str: str) -> tuple[int, int]:
 
 def _normalize_ncaa_date(raw_date: str) -> Optional[str]:
     """
-    Convert NCAA date strings like '03/15/2025' or 'Mar 15' to YYYY-MM-DD.
+    Convert NCAA date strings like '03/15/2025', 'Mar 15', or
+    '05/16/2026 04:00 PM' (scheduled games) to YYYY-MM-DD.
     Returns None if unparseable.
     """
     raw_date = raw_date.strip()
-    for fmt in ("%m/%d/%Y", "%m/%d/%y", "%b %d", "%B %d"):
+    for fmt in ("%m/%d/%Y %I:%M %p", "%m/%d/%Y", "%m/%d/%y", "%b %d", "%B %d"):
         try:
             dt = datetime.strptime(raw_date, fmt)
             if fmt in ("%b %d", "%B %d"):
@@ -464,51 +465,51 @@ class NCAAScraper(BasePlayerScraper):
         if not data_rows:
             return None
 
-        # The most recent game is typically the last non-total row
-        game_row = None
+        yesterday = (date.today() - timedelta(days=1)).isoformat()
+        today = date.today().isoformat()
+
+        # Scan backward through rows to find yesterday's (or today's) game.
+        # We skip future scheduled games (dates in the future), rows with
+        # unparseable dates, and totals rows.
+        col_map = None
         for row in reversed(data_rows):
             cells = row.find_all("td")
             if not cells:
                 continue
             first_cell_text = cells[0].get_text(strip=True).lower()
-            # Skip totals/averages rows
-            if any(
-                kw in first_cell_text
-                for kw in ("total", "avg", "average", "career")
-            ):
+            if any(kw in first_cell_text for kw in ("total", "avg", "average", "career")):
                 continue
-            game_row = cells
-            break
 
-        if game_row is None:
+            cell_values = [c.get_text(strip=True) for c in cells]
+            row_map = {}
+            for i, header in enumerate(headers):
+                if i < len(cell_values):
+                    row_map[header] = cell_values[i]
+
+            raw_date = row_map.get("date", "")
+            game_date_str = _normalize_ncaa_date(raw_date)
+            if not game_date_str:
+                continue  # unparseable (e.g. blank scheduled row) — try earlier row
+
+            if game_date_str in (yesterday, today):
+                col_map = row_map
+                col_map["_game_date"] = game_date_str
+                break
+
+            # Past the target date range — no point going further back
+            if game_date_str < yesterday:
+                logger.info(
+                    "%s last played on %s — no game to report",
+                    player["name"],
+                    game_date_str,
+                )
+                return None
+
+        if col_map is None:
+            logger.info("%s — no game found for %s or %s", player["name"], yesterday, today)
             return None
 
-        # Map headers to cell values
-        cell_values = [c.get_text(strip=True) for c in game_row]
-        col_map = {}
-        for i, header in enumerate(headers):
-            if i < len(cell_values):
-                col_map[header] = cell_values[i]
-
-        # Parse game date
-        raw_date = col_map.get("date", "")
-        game_date_str = _normalize_ncaa_date(raw_date)
-        if not game_date_str:
-            logger.warning(
-                "Could not parse date '%s' for %s", raw_date, player["name"]
-            )
-            return None
-
-        # Only care about yesterday's (or today's) game
-        yesterday = (date.today() - timedelta(days=1)).isoformat()
-        today = date.today().isoformat()
-        if game_date_str not in (yesterday, today):
-            logger.info(
-                "%s last played on %s — no game to report",
-                player["name"],
-                game_date_str,
-            )
-            return None
+        game_date_str = col_map.pop("_game_date")
 
         # Parse opponent and result
         opponent = col_map.get("opponent", "").strip()
