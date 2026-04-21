@@ -285,6 +285,20 @@ class NCAAScraper(BasePlayerScraper):
 
         # Find the "Game Log" tab link
         game_log_url = self._find_game_log_url(soup, ncaa_player_id)
+
+        # Last resort: discover the current D1 baseball sport-year control ID
+        # from the stats index page, then build the URL directly.
+        if not game_log_url:
+            ctl_id = self._discover_baseball_ctl_id()
+            if ctl_id:
+                game_log_url = (
+                    f"{NCAA_BASE}/players/{ncaa_player_id}"
+                    f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
+                )
+                logger.info(
+                    "Using discovered ctl_id=%s for %s", ctl_id, player["name"]
+                )
+
         if not game_log_url:
             logger.warning(
                 "Could not find game log URL for %s (id=%s)",
@@ -301,16 +315,41 @@ class NCAAScraper(BasePlayerScraper):
         # Step 3 — Parse the most recent game row
         return self._parse_most_recent_game(soup, player)
 
+    # Cache so we only spend one ScraperAPI credit discovering this per process lifetime
+    _cached_ctl_id: Optional[str] = None
+
+    def _discover_baseball_ctl_id(self) -> Optional[str]:
+        """
+        Fetch the NCAA D1 baseball team-stats index and pull out the current
+        game_sport_year_ctl_id.  Result is cached for the lifetime of the process.
+        """
+        if NCAAScraper._cached_ctl_id:
+            return NCAAScraper._cached_ctl_id
+        try:
+            resp = _get(f"{NCAA_BASE}/rankings/national_team_statistics")
+            raw = str(BeautifulSoup(resp.text, "html.parser"))
+            for pattern in [
+                r"game_sport_year_ctl_id[^0-9]+(\d{4,6})",
+                r"sport_year_ctl_id[^0-9]+(\d{4,6})",
+            ]:
+                match = re.search(pattern, raw)
+                if match:
+                    NCAAScraper._cached_ctl_id = match.group(1)
+                    logger.info("Discovered D1 baseball ctl_id=%s", NCAAScraper._cached_ctl_id)
+                    return NCAAScraper._cached_ctl_id
+        except Exception as exc:
+            logger.warning("Could not discover baseball ctl_id: %s", exc)
+        return None
+
     def _find_game_log_url(self, soup: BeautifulSoup, ncaa_player_id: str) -> Optional[str]:
         """Find the game-log link on the player profile page."""
-        # Try anchor tags with "game_log" in href
+        # 1. Direct game_log href in anchor tags
         for a in soup.find_all("a", href=True):
             href = a["href"]
             if "game_log" in href.lower():
                 return href if href.startswith("http") else NCAA_BASE + href
 
-        # Fallback: try the standard URL pattern directly
-        # Try to find the sport year control id from any stat links on the page
+        # 2. game_sport_year_ctl_id in any anchor href
         for a in soup.find_all("a", href=True):
             match = re.search(r"game_sport_year_ctl_id=(\d+)", a["href"])
             if match:
@@ -319,6 +358,35 @@ class NCAAScraper(BasePlayerScraper):
                     f"{NCAA_BASE}/players/{ncaa_player_id}"
                     f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
                 )
+
+        # 3. Search the entire raw HTML — covers JS variables, data attrs, JSON blobs
+        raw = str(soup)
+        for pattern in [
+            r"game_sport_year_ctl_id[^0-9]+(\d{4,6})",
+            r"sport_year_ctl_id[^0-9]+(\d{4,6})",
+            r"\"ctl_id\"\s*:\s*(\d{4,6})",
+            r"ctl_id=(\d{4,6})",
+        ]:
+            match = re.search(pattern, raw)
+            if match:
+                ctl_id = match.group(1)
+                return (
+                    f"{NCAA_BASE}/players/{ncaa_player_id}"
+                    f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
+                )
+
+        # 4. Check form fields / select options whose name suggests a sport-year selector
+        for el in soup.find_all(["input", "option"]):
+            val = el.get("value", "")
+            if not re.fullmatch(r"\d{4,6}", str(val)):
+                continue
+            name_attr = el.get("name", "") or (el.parent.get("name", "") if el.parent else "")
+            if re.search(r"sport.year|ctl.id|year.ctl", name_attr, re.I):
+                return (
+                    f"{NCAA_BASE}/players/{ncaa_player_id}"
+                    f"/game_log_stats?game_sport_year_ctl_id={val}"
+                )
+
         return None
 
     def _parse_most_recent_game(
