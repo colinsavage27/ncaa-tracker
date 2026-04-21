@@ -411,15 +411,64 @@ def logs():
     return render_template("logs.html", logs=recent, players=all_players, agents=all_agents)
 
 
-@app.route("/logs/lookup", methods=["POST"])
-def statline_lookup():
+def _background_statline_lookup(player_id: int, agent_id: int, game_date: str):
     """
-    Statline Lookup — scrape a player's stats for a specific date and email
-    the result immediately to the chosen agent.
+    Background thread: scrape a player's stats for a specific date and email
+    the result to the chosen agent. Uses full retry logic since this runs async.
     """
     import scraper as sc
     from emailer import build_email_body, build_html_email_body, _send_email
 
+    player = db.get_player(player_id)
+    agent  = db.get_agent(agent_id)
+    if not player or not agent:
+        logger.error("Statline lookup: player %d or agent %d not found", player_id, agent_id)
+        return
+
+    source = player.get("source", "ncaa")
+    stats  = None
+
+    try:
+        primary = sc.get_scraper(source)
+        if hasattr(primary, "fetch_game_for_date"):
+            stats = primary.fetch_game_for_date(player, game_date)
+    except Exception as exc:
+        logger.warning("Statline lookup primary failed for %s: %s", player["name"], exc)
+
+    if stats is None and source != "ncaa" and player.get("ncaa_player_id"):
+        try:
+            stats = sc.NCAAScraper().fetch_game_for_date(player, game_date)
+        except Exception as exc:
+            logger.warning("Statline lookup NCAA fallback failed for %s: %s", player["name"], exc)
+
+    if stats is None:
+        logger.warning("Statline lookup: no stats found for %s on %s", player["name"], game_date)
+        return
+
+    log_id = db.upsert_game_log(player["id"], game_date, stats)
+    with db.get_conn() as conn:
+        conn.execute("UPDATE games_log SET sent = 1 WHERE id = ?", (log_id,))
+
+    player_row = {
+        "player_name": player["name"],
+        "school":      player["school"],
+        "position":    player["position"],
+        "stats":       stats,
+    }
+    subject    = f"Statline Lookup — {player['name']} on {game_date}"
+    plain_body = build_email_body(agent["name"], [player_row], game_date)
+    html_body  = build_html_email_body(agent["name"], [player_row], game_date)
+
+    try:
+        _send_email(agent["email"], subject, plain_body, html_body)
+        logger.info("Statline email sent: %s on %s → %s", player["name"], game_date, agent["email"])
+    except Exception as exc:
+        logger.error("Statline lookup email failed for %s: %s", player["name"], exc)
+
+
+@app.route("/logs/lookup", methods=["POST"])
+def statline_lookup():
+    """Kick off a background scrape+email for one player on a specific date."""
     player_id_raw = request.form.get("player_id", "").strip()
     agent_id_raw  = request.form.get("agent_id", "").strip()
     game_date     = request.form.get("game_date", "").strip()
@@ -438,77 +487,74 @@ def statline_lookup():
         flash("Please select an agent to send the statline to.", "error")
         return redirect(url_for("logs"))
 
-    # Try primary scraper for that date; fall back to NCAA if we have an ID
-    source = player.get("source", "ncaa")
-    stats = None
+    t = threading.Thread(
+        target=_background_statline_lookup,
+        args=(player["id"], agent["id"], game_date),
+        daemon=True,
+    )
+    t.start()
 
-    try:
-        primary = sc.get_scraper(source)
-        if hasattr(primary, "fetch_game_for_date"):
-            stats = primary.fetch_game_for_date(player, game_date)
-    except Exception as exc:
-        logger.warning("Primary scraper lookup failed for %s: %s", player["name"], exc)
-
-    if stats is None and source != "ncaa" and player.get("ncaa_player_id"):
-        logger.info("Falling back to NCAA scraper for lookup: %s on %s", player["name"], game_date)
-        try:
-            stats = sc.NCAAScraper().fetch_game_for_date(player, game_date)
-        except Exception as exc:
-            logger.warning("NCAA fallback lookup failed for %s: %s", player["name"], exc)
-
-    if stats is None:
-        ncaa_id = player.get("ncaa_player_id", "")
-        ncaa_link = (
-            f" View their full game log manually: "
-            f"stats.ncaa.org/players/{ncaa_id}"
-            if ncaa_id else ""
-        )
-        flash(
-            f"Could not scrape stats for {player['name']} on {game_date} — "
-            f"ScraperAPI may be temporarily blocked on this player's page.{ncaa_link} "
-            f"Try again in a few minutes, or use the date picker to confirm they played that day.",
-            "error",
-        )
-        return redirect(url_for("logs"))
-
-    # Persist to logs (unsent=0 so it won't be double-sent by the nightly job)
-    log_id = db.upsert_game_log(player["id"], game_date, stats)
-    with db.get_conn() as conn:
-        conn.execute("UPDATE games_log SET sent = 1 WHERE id = ?", (log_id,))
-
-    # Build and send the email
-    player_row = {
-        "player_name": player["name"],
-        "school":      player["school"],
-        "position":    player["position"],
-        "stats":       stats,
-    }
-    subject    = f"Statline Lookup — {player['name']} on {game_date}"
-    plain_body = build_email_body(agent["name"], [player_row], game_date)
-    html_body  = build_html_email_body(agent["name"], [player_row], game_date)
-
-    try:
-        _send_email(agent["email"], subject, plain_body, html_body)
-        flash(
-            f"Statline for {player['name']} on {game_date} sent to "
-            f"{agent['name']} ({agent['email']}).",
-            "success",
-        )
-    except Exception as exc:
-        logger.error("Email send failed for statline lookup: %s", exc)
-        flash(f"Stats found but email failed: {exc}", "error")
-
+    flash(
+        f"Looking up {player['name']} on {game_date}. "
+        f"This runs in the background — if stats are found, an email goes to "
+        f"{agent['name']} and the entry appears in Recent Entries below. "
+        f"Refresh in 2 minutes.",
+        "success",
+    )
     return redirect(url_for("logs"))
 
 
 @app.route("/admin/run-now", methods=["POST"])
 def admin_run_now():
-    """Trigger the nightly scrape+email job immediately."""
-    import threading
+    """
+    Trigger a scrape+email run immediately.
+
+    If a target_date is supplied (from the date picker), skip re-scraping and
+    just re-send the logs already in the DB for that date — useful for testing
+    the email pipeline with data that was collected on a previous run.
+
+    If no date is supplied, run the full nightly job (scrape yesterday + email).
+    """
     from scheduler import run_nightly_job
-    t = threading.Thread(target=run_nightly_job, daemon=True)
-    t.start()
-    flash("Nightly job triggered — scraping and emailing now. Check back in 1–2 minutes.", "success")
+    from emailer import send_nightly_emails
+
+    target_date = request.form.get("target_date", "").strip() or None
+
+    if target_date:
+        # Reset sent=0 for that date so the emailer picks them up again
+        with db.get_conn() as conn:
+            updated = conn.execute(
+                "UPDATE games_log SET sent = 0 WHERE game_date = ?", (target_date,)
+            ).rowcount
+        if updated == 0:
+            flash(
+                f"No log entries found for {target_date}. "
+                "Run a full scrape first (leave the date blank) or use Statline Lookup "
+                "to pull stats for a specific player.",
+                "error",
+            )
+            return redirect(url_for("logs"))
+
+        def _resend():
+            sent = send_nightly_emails(target_date=target_date)
+            logger.info("Manual re-send for %s: %d email(s) sent.", target_date, sent)
+
+        t = threading.Thread(target=_resend, daemon=True)
+        t.start()
+        flash(
+            f"Sending {updated} log(s) for {target_date} — "
+            "email(s) will arrive in about 30 seconds.",
+            "success",
+        )
+    else:
+        t = threading.Thread(target=run_nightly_job, daemon=True)
+        t.start()
+        flash(
+            "Nightly job triggered — scraping yesterday's games and emailing agents. "
+            "Check back in 2 minutes.",
+            "success",
+        )
+
     return redirect(url_for("logs"))
 
 

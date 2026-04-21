@@ -9,10 +9,20 @@
 <!-- Manual Scrape card -->
 <div class="card" style="border-color:#27ae60;">
   <h2 style="margin-top:0;">Manual Scrape</h2>
-  <p style="font-size:13px; color:#555; margin-top:-8px; margin-bottom:14px;">
-    Scrape all players right now and send emails to their assigned agents.
-  </p>
   <form method="POST" action="/admin/run-now">
+    <div style="display:flex; gap:12px; align-items:flex-end; flex-wrap:wrap; margin-bottom:14px;">
+      <div class="form-group" style="margin:0; flex:0 0 auto;">
+        <label style="font-size:13px; color:#555;">
+          Re-send a past date's emails
+          <span style="font-weight:400; color:#999;">(optional — leave blank to scrape today)</span>
+        </label>
+        <input type="date" name="target_date" style="width:180px;">
+      </div>
+    </div>
+    <p style="font-size:13px; color:#555; margin:0 0 12px 0;">
+      <strong>With a date:</strong> re-sends emails for logs already in the database — use this to test the email pipeline with real past data.<br>
+      <strong>Without a date:</strong> scrapes all players for yesterday and emails their assigned agents.
+    </p>
     <button type="submit" class="btn btn-primary">Scrape &amp; Email Now</button>
   </form>
 </div>
@@ -21,8 +31,8 @@
 <div class="card" style="border-color:#1a3a5c;">
   <h2 style="margin-top:0;">Statline Lookup</h2>
   <p style="font-size:13px; color:#555; margin-top:-8px; margin-bottom:14px;">
-    Pull a player's box score from any date and send it directly to an agent's inbox.
-    Great for checking what a client did against a specific team or pitcher.
+    Pull a player's box score from any date and send it to an agent's inbox.
+    Runs in the background — you'll get a confirmation email within 2 minutes.
   </p>
   <form method="POST" action="/logs/lookup">
     <div class="form-row three">

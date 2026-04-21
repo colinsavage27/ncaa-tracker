@@ -336,16 +336,16 @@ class NCAAScraper(BasePlayerScraper):
         Fetch stats for *player* on a specific *target_date* (YYYY-MM-DD).
         Used by the Statline Lookup feature for historical queries.
 
-        Uses quick=True: single ScraperAPI attempt, no retries, no empty-page
-        retry loop.  If ScraperAPI is 500ing on this page it will still be
-        500ing in 3 more minutes — fail fast and let the user try again later.
+        Runs with full retry logic (quick=False) since it is called from a
+        background thread — the user gets an immediate response and the result
+        appears in the log table when complete.
         """
         ncaa_player_id = player.get("ncaa_player_id")
         if not ncaa_player_id:
             logger.warning("Player %s has no ncaa_player_id — skipping", player["name"])
             return None
         try:
-            return self._scrape_game_log(player, ncaa_player_id, target_date=target_date, quick=True)
+            return self._scrape_game_log(player, ncaa_player_id, target_date=target_date, quick=False)
         except Exception as exc:
             logger.warning(
                 "fetch_game_for_date failed for %s on %s: %s", player["name"], target_date, exc
@@ -371,7 +371,9 @@ class NCAAScraper(BasePlayerScraper):
         # (skipped entirely in quick mode).
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
-        _get_retries  = 0 if quick else 3   # retries inside _get() on HTTP 500
+        # quick=True  → 1 retry (render=false first, then render=true): ~2 attempts max
+        # quick=False → 3 retries (full escalation): background nightly job
+        _get_retries  = 1 if quick else 3
         _empty_waits  = [] if quick else [8, 12]  # retry delays for empty-page responses
         soup = None
         for page_attempt in range(1 + len(_empty_waits)):
