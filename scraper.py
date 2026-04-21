@@ -61,11 +61,13 @@ REQUEST_DELAY = 0.0  # No delay needed — all NCAA requests route through Scrap
 SCRAPERAPI_ULTRA = os.getenv("SCRAPERAPI_ULTRA", "false").lower() == "true"
 
 
-def _scraperapi_url(target_url: str) -> str:
+def _scraperapi_url(target_url: str, **extra_params) -> str:
     """Wrap a target URL for delivery through ScraperAPI with JS rendering.
 
     Set SCRAPERAPI_ULTRA=true in .env to enable Ultra Premium mode, which
     is required for Akamai-protected sites like stats.ncaa.org.
+    Pass extra_params to override or extend the ScraperAPI query string
+    (e.g. country_code='us', device_type='mobile') for retry variation.
     """
     params = {
         "api_key": SCRAPERAPI_KEY,
@@ -74,28 +76,49 @@ def _scraperapi_url(target_url: str) -> str:
     }
     if SCRAPERAPI_ULTRA:
         params["ultra_premium"] = "true"
+    params.update(extra_params)
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
+
+
+# Each retry uses a different set of ScraperAPI params so Akamai sees a
+# different fingerprint / proxy pool on every attempt.
+# Attempt 0 — baseline ultra premium
+# Attempt 1 — force US residential IPs  (different proxy pool)
+# Attempt 2 — US residential + mobile Chrome UA  (different device fingerprint)
+# Attempt 3 — US residential + mobile + randomised session  (fresh sticky IP)
+_SCRAPERAPI_RETRY_PARAMS: list[dict] = [
+    {},
+    {"country_code": "us"},
+    {"country_code": "us", "device_type": "mobile"},
+    {"country_code": "us", "device_type": "mobile",
+     "session_number": str(__import__("random").randint(0, 9999))},
+]
 
 
 def _get(url: str, retries: int = 3, **kwargs):
     """Fetch url via ScraperAPI (if key configured) or directly.
-    Retries up to `retries` times on 500 errors (ScraperAPI transient failures).
-    Uses progressively longer waits: 6s, 10s, 16s."""
+    Retries up to `retries` times on 500 errors.
+    Each retry uses different ScraperAPI params so Akamai sees a fresh fingerprint."""
     if REQUEST_DELAY:
         time.sleep(REQUEST_DELAY)
-    if SCRAPERAPI_KEY:
-        fetch_url = _scraperapi_url(url)
-    else:
-        logger.warning(
-            "SCRAPERAPI_KEY not set — requesting %s directly. "
-            "Expect 403 from stats.ncaa.org (Akamai protection).",
-            url,
-        )
-        fetch_url = url
 
     _RETRY_WAITS = [6, 10, 16, 25]  # seconds before each retry attempt
     last_exc = None
     for attempt in range(1 + retries):
+        if SCRAPERAPI_KEY:
+            extra = _SCRAPERAPI_RETRY_PARAMS[min(attempt, len(_SCRAPERAPI_RETRY_PARAMS) - 1)]
+            fetch_url = _scraperapi_url(url, **extra)
+            if attempt > 0:
+                logger.info("ScraperAPI retry %d — params: %s", attempt, extra)
+        else:
+            if attempt == 0:
+                logger.warning(
+                    "SCRAPERAPI_KEY not set — requesting %s directly. "
+                    "Expect 403 from stats.ncaa.org (Akamai protection).",
+                    url,
+                )
+            fetch_url = url
+
         try:
             resp = SESSION.get(fetch_url, timeout=120, **kwargs)
             resp.raise_for_status()
