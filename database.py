@@ -183,6 +183,14 @@ def update_player_ncaa_id(player_id: int, ncaa_player_id: str):
         )
 
 
+def update_player_source(player_id: int, source: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET source = ? WHERE id = ?",
+            (source, player_id),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Games log queries
 # ---------------------------------------------------------------------------

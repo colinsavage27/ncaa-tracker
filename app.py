@@ -392,14 +392,9 @@ def set_ncaa_id(player_id: int):
         flash("Please enter a valid numeric NCAA player ID.", "error")
         return redirect(url_for("players"))
     db.update_player_ncaa_id(player_id, ncaa_id)
-    db.update_player_scrape_status(player_id, "pending", "")
-    _t = threading.Thread(
-        target=_background_verify_player,
-        args=(player_id, player["name"], player["school"]),
-        daemon=True,
-    )
-    _t.start()
-    flash(f"NCAA ID saved for {player['name']} — verifying now. Refresh in 30 seconds.", "success")
+    db.update_player_source(player_id, "ncaa")
+    db.update_player_scrape_status(player_id, "verified", "")
+    flash(f"NCAA ID saved for {player['name']} — ✓ Verified. They'll be scraped tonight.", "success")
     return redirect(url_for("players"))
 
 

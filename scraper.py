@@ -954,30 +954,30 @@ def _test_ncaa_connectivity(player: dict) -> tuple[bool, str]:
 
 def test_player_connectivity(player: dict) -> tuple[bool, str]:
     """
-    Verify that we can reach a player's stats source.
-    Tries the primary source first, then falls back to NCAA if ncaa_player_id is set.
+    Verify that we have what we need to scrape this player.
+
+    For Sidearm: makes a direct (non-ScraperAPI) call to the stats API to confirm
+    the endpoint is reachable.  Fast — no credit cost.
+    For NCAA: just confirms an ncaa_player_id is configured (the nightly job proves
+    the real connectivity when it runs).
+
     Returns (success, error_message).
     """
     source = player.get("source", "ncaa")
 
-    if source == "sidearm":
-        ok, err = _test_sidearm_connectivity(player, legacy=False)
-    elif source == "sidearm_legacy":
-        ok, err = _test_sidearm_connectivity(player, legacy=True)
-    else:
-        return _test_ncaa_connectivity(player)
-
-    if ok:
-        return True, ""
-
-    # Try NCAA fallback if the player already has an ncaa_player_id
-    if player.get("ncaa_player_id"):
-        ncaa_ok, ncaa_err = _test_ncaa_connectivity(player)
-        if ncaa_ok:
+    if source in ("sidearm", "sidearm_legacy"):
+        ok, err = _test_sidearm_connectivity(player, legacy=(source == "sidearm_legacy"))
+        if ok:
             return True, ""
-        return False, f"{err} | NCAA fallback: {ncaa_err}"
+        # Sidearm failed — but if we have an NCAA fallback ID, we're still good
+        if player.get("ncaa_player_id"):
+            return True, ""
+        return False, err
 
-    return False, err
+    # NCAA source — just check that we have a player ID
+    if player.get("ncaa_player_id"):
+        return True, ""
+    return False, "No NCAA player ID configured — use Fix to add one manually"
 
 
 # ---------------------------------------------------------------------------
