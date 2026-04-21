@@ -131,6 +131,17 @@ SCHOOL_ATHLETICS_MAP: dict[str, str] = {
     "purdue": "https://purduesports.com",
     "rutgers": "https://scarletknights.com",
 
+    # West Coast / Mountain West / Independent
+    "byu": "https://byucougars.com",
+    "brigham young": "https://byucougars.com",
+    "san diego state": "https://goaztecs.com",
+    "nevada": "https://nevadawolfpack.com",
+    "unlv": "https://unlvrebels.com",
+    "fresno state": "https://gobulldogs.com",
+    "new mexico state": "https://nmsusports.com",
+    "hawaii": "https://hawaiiathletics.com",
+    "air force": "https://goairforcefalcons.com",
+
     # American / Sun Belt / CUSA / other prominent programs
     "cal state fullerton": "https://fullertontitans.com",
     "dallas baptist": "https://dbupatriots.com",
@@ -167,6 +178,8 @@ _ALIASES: dict[str, str] = {
     "gt": "georgia tech",
     "georgia tech": "georgia tech",
     "virginia tech": "virginia tech",
+    "byu": "byu",
+    "texas tech": "texas tech",
     "texas tech": "texas tech",
     "louisiana tech": "louisiana tech",
     "wfu": "wake forest",
