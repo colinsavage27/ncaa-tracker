@@ -397,25 +397,52 @@ class NCAAScraper(BasePlayerScraper):
         game, or None if the player had no game yesterday.
         """
         table = soup.find("table", id=re.compile(r"game_log", re.I))
+
         if table is None:
-            # Try any table that looks like a game log
-            tables = soup.find_all("table")
-            table = next(
-                (
-                    t
-                    for t in tables
-                    if t.find("th", string=re.compile(r"date|opponent", re.I))
-                ),
-                None,
+            all_tables = soup.find_all("table")
+            for t in all_tables:
+                # Check <th> elements
+                ths = t.find_all("th")
+                if any(
+                    re.search(r"\bdate\b|\bopponent\b", th.get_text(strip=True), re.I)
+                    for th in ths
+                ):
+                    table = t
+                    break
+                # Some NCAA tables use <td> for headers in the first row
+                first_row = t.find("tr")
+                if first_row:
+                    tds = first_row.find_all("td")
+                    if any(
+                        re.search(r"\bdate\b|\bopponent\b", td.get_text(strip=True), re.I)
+                        for td in tds
+                    ):
+                        table = t
+                        break
+
+        if table is None:
+            all_tables = soup.find_all("table")
+            logger.warning(
+                "No game log table found for %s — %d table(s) on page; "
+                "headers seen: %s",
+                player["name"],
+                len(all_tables),
+                [
+                    [th.get_text(strip=True) for th in t.find_all("th")][:6]
+                    for t in all_tables[:3]
+                ],
             )
-        if table is None:
-            logger.warning("No game log table found for %s", player["name"])
             return None
 
         headers = [
             th.get_text(strip=True).lower()
             for th in table.find_all("th")
         ]
+        # Fallback: headers from first row <td>s if no <th> found
+        if not headers:
+            first_row = table.find("tr")
+            if first_row:
+                headers = [td.get_text(strip=True).lower() for td in first_row.find_all("td")]
 
         rows = table.find_all("tr")
         # Filter to data rows (skip header rows)
