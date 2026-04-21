@@ -303,32 +303,47 @@ class NCAAScraper(BasePlayerScraper):
         """
         Fetch stats for *player* on a specific *target_date* (YYYY-MM-DD).
         Used by the Statline Lookup feature for historical queries.
+
+        Uses quick=True: single ScraperAPI attempt, no retries, no empty-page
+        retry loop.  If ScraperAPI is 500ing on this page it will still be
+        500ing in 3 more minutes — fail fast and let the user try again later.
         """
         ncaa_player_id = player.get("ncaa_player_id")
         if not ncaa_player_id:
             logger.warning("Player %s has no ncaa_player_id — skipping", player["name"])
             return None
         try:
-            return self._scrape_game_log(player, ncaa_player_id, target_date=target_date)
+            return self._scrape_game_log(player, ncaa_player_id, target_date=target_date, quick=True)
         except Exception as exc:
-            logger.exception(
-                "Error fetching stats for %s on %s: %s", player["name"], target_date, exc
+            logger.warning(
+                "fetch_game_for_date failed for %s on %s: %s", player["name"], target_date, exc
             )
             return None
 
     def _scrape_game_log(
-        self, player: dict, ncaa_player_id: str, target_date: Optional[str] = None
+        self,
+        player: dict,
+        ncaa_player_id: str,
+        target_date: Optional[str] = None,
+        quick: bool = False,
     ) -> Optional[dict]:
+        """
+        quick=True  — single ScraperAPI call, no retries, no empty-page loops.
+                      Used by Statline Lookup so users get a fast answer (< 90s).
+        quick=False — full retry behaviour for the nightly background job.
+        """
         # Step 1 — Load the player profile page.
         # ScraperAPI occasionally returns HTTP 200 with nearly-empty HTML
         # (Akamai soft-challenge page that passes the status check but has no
-        # content).  Detect this by checking for 0 tables and retry up to 3x.
+        # content).  Detect this by checking for 0 tables and retry up to 2x
+        # (skipped entirely in quick mode).
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
+        _get_retries  = 0 if quick else 3   # retries inside _get() on HTTP 500
+        _empty_waits  = [] if quick else [8, 12]  # retry delays for empty-page responses
         soup = None
-        _empty_waits = [8, 12]  # retry delays when ScraperAPI returns empty page
         for page_attempt in range(1 + len(_empty_waits)):
-            resp = _get(profile_url)
+            resp = _get(profile_url, retries=_get_retries)
             soup = BeautifulSoup(resp.text, "html.parser")
             if soup.find("table") or len(resp.text) > 5000:
                 break  # page looks real

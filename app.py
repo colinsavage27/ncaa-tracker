@@ -457,10 +457,16 @@ def statline_lookup():
             logger.warning("NCAA fallback lookup failed for %s: %s", player["name"], exc)
 
     if stats is None:
+        ncaa_id = player.get("ncaa_player_id", "")
+        ncaa_link = (
+            f" View their full game log manually: "
+            f"stats.ncaa.org/players/{ncaa_id}"
+            if ncaa_id else ""
+        )
         flash(
-            f"No stats found for {player['name']} on {game_date}. "
-            "The player may not have played that day, or the date is outside "
-            "the current season's game log.",
+            f"Could not scrape stats for {player['name']} on {game_date} — "
+            f"ScraperAPI may be temporarily blocked on this player's page.{ncaa_link} "
+            f"Try again in a few minutes, or use the date picker to confirm they played that day.",
             "error",
         )
         return redirect(url_for("logs"))
