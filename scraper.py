@@ -277,27 +277,34 @@ class NCAAScraper(BasePlayerScraper):
         return None
 
     def _scrape_game_log(self, player: dict, ncaa_player_id: str) -> Optional[dict]:
-        # Step 1 — Load the player profile to find the game log link
+        # Step 1 — Load the player profile page
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
-        logger.debug("Fetching profile: %s", profile_url)
+        logger.info("Fetching NCAA profile: %s", profile_url)
         resp = _get(profile_url)
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Find the "Game Log" tab link
+        # Step 2 — Try parsing game log directly from the profile page.
+        # stats.ncaa.org renders the full game-by-game table on the profile
+        # page itself (visible in the "Game By Game" section), so we can often
+        # skip the second ScraperAPI call entirely.
+        result = self._parse_most_recent_game(soup, player)
+        if result is not None:
+            logger.info("Parsed game log from profile page for %s", player["name"])
+            return result
+
+        # Step 3 — Profile page didn't have the table; find and follow the
+        # dedicated game-log tab URL.
         game_log_url = self._find_game_log_url(soup, ncaa_player_id)
 
-        # Last resort: discover the current D1 baseball sport-year control ID
-        # from the stats index page, then build the URL directly.
         if not game_log_url:
             ctl_id = self._discover_baseball_ctl_id()
             if ctl_id:
+                # Use the standard /player/game_log?... format
                 game_log_url = (
-                    f"{NCAA_BASE}/players/{ncaa_player_id}"
-                    f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
+                    f"{NCAA_BASE}/player/game_log"
+                    f"?game_sport_year_ctl_id={ctl_id}&player_id={ncaa_player_id}"
                 )
-                logger.info(
-                    "Using discovered ctl_id=%s for %s", ctl_id, player["name"]
-                )
+                logger.info("Using discovered ctl_id=%s for %s", ctl_id, player["name"])
 
         if not game_log_url:
             logger.warning(
@@ -307,12 +314,9 @@ class NCAAScraper(BasePlayerScraper):
             )
             return None
 
-        # Step 2 — Load the game log page
-        logger.debug("Fetching game log: %s", game_log_url)
+        logger.info("Fetching game log page: %s", game_log_url)
         resp = _get(game_log_url)
         soup = BeautifulSoup(resp.text, "html.parser")
-
-        # Step 3 — Parse the most recent game row
         return self._parse_most_recent_game(soup, player)
 
     # Cache so we only spend one ScraperAPI credit discovering this per process lifetime
@@ -349,15 +353,21 @@ class NCAAScraper(BasePlayerScraper):
             if "game_log" in href.lower():
                 return href if href.startswith("http") else NCAA_BASE + href
 
-        # 2. game_sport_year_ctl_id in any anchor href
+        # 2. game_sport_year_ctl_id in any anchor href — use href as-is
         for a in soup.find_all("a", href=True):
-            match = re.search(r"game_sport_year_ctl_id=(\d+)", a["href"])
-            if match:
-                ctl_id = match.group(1)
-                return (
-                    f"{NCAA_BASE}/players/{ncaa_player_id}"
-                    f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
-                )
+            if "game_sport_year_ctl_id" in a["href"]:
+                href = a["href"]
+                # If the link already points somewhere useful, follow it
+                if "game_log" in href.lower():
+                    return href if href.startswith("http") else NCAA_BASE + href
+                # Otherwise extract the ctl_id and build the canonical URL
+                match = re.search(r"game_sport_year_ctl_id=(\d+)", href)
+                if match:
+                    ctl_id = match.group(1)
+                    return (
+                        f"{NCAA_BASE}/player/game_log"
+                        f"?game_sport_year_ctl_id={ctl_id}&player_id={ncaa_player_id}"
+                    )
 
         # 3. Search the entire raw HTML — covers JS variables, data attrs, JSON blobs
         raw = str(soup)
@@ -371,8 +381,8 @@ class NCAAScraper(BasePlayerScraper):
             if match:
                 ctl_id = match.group(1)
                 return (
-                    f"{NCAA_BASE}/players/{ncaa_player_id}"
-                    f"/game_log_stats?game_sport_year_ctl_id={ctl_id}"
+                    f"{NCAA_BASE}/player/game_log"
+                    f"?game_sport_year_ctl_id={ctl_id}&player_id={ncaa_player_id}"
                 )
 
         # 4. Check form fields / select options whose name suggests a sport-year selector
