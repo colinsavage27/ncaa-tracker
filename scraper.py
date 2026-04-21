@@ -75,8 +75,9 @@ def _scraperapi_url(target_url: str) -> str:
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
 
 
-def _get(url: str, **kwargs):
-    """Fetch url via ScraperAPI (if key configured) or directly."""
+def _get(url: str, retries: int = 2, **kwargs):
+    """Fetch url via ScraperAPI (if key configured) or directly.
+    Retries up to `retries` times on 500 errors (ScraperAPI transient failures)."""
     time.sleep(REQUEST_DELAY)
     if SCRAPERAPI_KEY:
         fetch_url = _scraperapi_url(url)
@@ -87,9 +88,22 @@ def _get(url: str, **kwargs):
             url,
         )
         fetch_url = url
-    resp = SESSION.get(fetch_url, timeout=60, **kwargs)
-    resp.raise_for_status()
-    return resp
+
+    last_exc = None
+    for attempt in range(1 + retries):
+        try:
+            resp = SESSION.get(fetch_url, timeout=90, **kwargs)
+            resp.raise_for_status()
+            return resp
+        except requests.HTTPError as exc:
+            last_exc = exc
+            if exc.response is not None and exc.response.status_code == 500 and attempt < retries:
+                wait = 10 * (attempt + 1)
+                logger.warning("ScraperAPI 500 for %s — retrying in %ds (attempt %d/%d)", url, wait, attempt + 1, retries)
+                time.sleep(wait)
+                continue
+            raise
+    raise last_exc
 
 
 def _direct_get(url: str, **kwargs):
