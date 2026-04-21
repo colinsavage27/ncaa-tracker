@@ -95,7 +95,7 @@ def _extract_ncaa_ids(url_or_id: str) -> tuple[str, str]:
 
 
 def _background_ncaa_lookup(player_id: int, name: str, school: str):
-    """Background thread: find NCAA player ID via search and store it."""
+    """Background thread: find NCAA player ID via search and store it (ID only, no status change)."""
     try:
         ncaa_id = pd.search_ncaa_player_id(name, school)
         if ncaa_id:
@@ -105,6 +105,44 @@ def _background_ncaa_lookup(player_id: int, name: str, school: str):
             logger.info("Background NCAA ID lookup: no ID found for %s", name)
     except Exception as exc:
         logger.warning("Background NCAA ID lookup failed for %s: %s", name, exc)
+
+
+def _background_verify_player(player_id: int, name: str, school: str):
+    """
+    Background thread: find NCAA player ID if missing, then test connectivity
+    and update scrape_status to 'verified' or 'failed'.
+    """
+    import scraper as sc
+    try:
+        player = db.get_player(player_id)
+        if not player:
+            return
+
+        # Step 1: find NCAA ID if missing (needed for fallback)
+        if not player.get("ncaa_player_id"):
+            ncaa_id = pd.search_ncaa_player_id(name, school)
+            if ncaa_id:
+                db.update_player_ncaa_id(player_id, ncaa_id)
+                player = db.get_player(player_id)  # refresh with new ID
+                logger.info("Found NCAA ID %s for %s", ncaa_id, name)
+            else:
+                logger.info("No NCAA ID found for %s via search", name)
+
+        # Step 2: test connectivity and update status
+        success, error = sc.test_player_connectivity(player)
+        if success:
+            db.update_player_scrape_status(player_id, "verified", "")
+            logger.info("Player %s verified — stats source reachable", name)
+        else:
+            db.update_player_scrape_status(player_id, "failed", error or "Could not reach stats")
+            logger.warning("Player %s verification failed: %s", name, error)
+
+    except Exception as exc:
+        logger.warning("Background verify failed for player_id=%d (%s): %s", player_id, name, exc)
+        try:
+            db.update_player_scrape_status(player_id, "failed", str(exc))
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +271,7 @@ def add_player():
                     assigned_agent_id=assigned_agent_id,
                     source="ncaa",
                 )
-                _t = threading.Thread(target=_background_ncaa_lookup, args=(player_db_id, name, school), daemon=True)
+                _t = threading.Thread(target=_background_verify_player, args=(player_db_id, name, school), daemon=True)
                 _t.start()
                 flash(f"Player '{name}' added with NCAA scraper.", "success")
                 return redirect(url_for("players"))
@@ -263,10 +301,10 @@ def add_player():
                     ncaa_team_id="",
                     position=position,
                     assigned_agent_id=assigned_agent_id,
-                    source="sidearm",
+                    source=detection.source,
                     sidearm_url=detection.player_url,
                 )
-                _t = threading.Thread(target=_background_ncaa_lookup, args=(player_db_id, name, school), daemon=True)
+                _t = threading.Thread(target=_background_verify_player, args=(player_db_id, name, school), daemon=True)
                 _t.start()
                 flash(
                     f"Player '{name}' added with Sidearm scraper. "
@@ -326,19 +364,19 @@ def assign_player(player_id: int):
 
 @app.route("/players/verify/<int:player_id>", methods=["POST"])
 def verify_player(player_id: int):
-    """Re-run NCAA ID lookup and reset scrape status to pending."""
+    """Test connectivity for this player and update scrape_status to verified/failed."""
     player = db.get_player(player_id)
     if not player:
         flash("Player not found.", "error")
         return redirect(url_for("players"))
     db.update_player_scrape_status(player_id, "pending", "")
     _t = threading.Thread(
-        target=_background_ncaa_lookup,
+        target=_background_verify_player,
         args=(player_id, player["name"], player["school"]),
         daemon=True,
     )
     _t.start()
-    flash(f"Re-checking {player['name']} — refresh in 30 seconds to see the result.", "success")
+    flash(f"Checking {player['name']} — refresh in 30 seconds to see the result.", "success")
     return redirect(url_for("players"))
 
 
@@ -355,7 +393,13 @@ def set_ncaa_id(player_id: int):
         return redirect(url_for("players"))
     db.update_player_ncaa_id(player_id, ncaa_id)
     db.update_player_scrape_status(player_id, "pending", "")
-    flash(f"NCAA ID saved for {player['name']}. Will verify on next scrape run.", "success")
+    _t = threading.Thread(
+        target=_background_verify_player,
+        args=(player_id, player["name"], player["school"]),
+        daemon=True,
+    )
+    _t.start()
+    flash(f"NCAA ID saved for {player['name']} — verifying now. Refresh in 30 seconds.", "success")
     return redirect(url_for("players"))
 
 

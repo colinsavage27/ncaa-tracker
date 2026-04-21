@@ -894,6 +894,93 @@ def get_scraper(source: str = "ncaa") -> BasePlayerScraper:
 
 
 # ---------------------------------------------------------------------------
+# Player connectivity test — used by "Check now" / verify flow in the UI
+# ---------------------------------------------------------------------------
+
+
+def _test_sidearm_connectivity(player: dict, *, legacy: bool = False) -> tuple[bool, str]:
+    """Check whether the Sidearm stats API endpoint is reachable for this player."""
+    url = player.get("sidearm_schedule_url") or player.get("sidearm_url")
+    if not url:
+        return False, "No Sidearm URL configured"
+    try:
+        parsed = urlparse(url)
+        base_url = f"{parsed.scheme}://{parsed.netloc}"
+        path_parts = [p for p in parsed.path.split("/") if p]
+        sport = path_parts[1] if len(path_parts) > 1 else "baseball"
+        pid = path_parts[-1] if path_parts and path_parts[-1].isdigit() else None
+        if not pid:
+            return False, "Could not extract player ID from Sidearm URL"
+        year = date.today().year
+        if legacy:
+            _direct_get(
+                f"{base_url}/services/responsive-roster-bio.ashx",
+                params={"type": "stats", "rp_id": pid, "path": sport,
+                        "year": year, "player_id": 0},
+            )
+        else:
+            _direct_get(
+                f"{base_url}/api/v2/stats/bio",
+                params={"rosterPlayerId": pid, "sport": sport, "year": year},
+            )
+        return True, ""
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response else "?"
+        if code == 404:
+            return (
+                False,
+                "This school uses the WMT Games platform — Sidearm stats API not "
+                "available. Enter the player's NCAA Stats ID manually using Fix.",
+            )
+        return False, f"HTTP {code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def _test_ncaa_connectivity(player: dict) -> tuple[bool, str]:
+    """Check whether the NCAA stats profile page loads for this player."""
+    ncaa_id = player.get("ncaa_player_id")
+    if not ncaa_id:
+        return False, "No NCAA player ID — use Fix to add one manually"
+    try:
+        _get(f"{NCAA_BASE}/players/{ncaa_id}")
+        return True, ""
+    except requests.HTTPError as exc:
+        code = exc.response.status_code if exc.response else "?"
+        return False, f"NCAA profile returned HTTP {code}"
+    except Exception as exc:
+        return False, str(exc)
+
+
+def test_player_connectivity(player: dict) -> tuple[bool, str]:
+    """
+    Verify that we can reach a player's stats source.
+    Tries the primary source first, then falls back to NCAA if ncaa_player_id is set.
+    Returns (success, error_message).
+    """
+    source = player.get("source", "ncaa")
+
+    if source == "sidearm":
+        ok, err = _test_sidearm_connectivity(player, legacy=False)
+    elif source == "sidearm_legacy":
+        ok, err = _test_sidearm_connectivity(player, legacy=True)
+    else:
+        return _test_ncaa_connectivity(player)
+
+    if ok:
+        return True, ""
+
+    # Try NCAA fallback if the player already has an ncaa_player_id
+    if player.get("ncaa_player_id"):
+        ncaa_ok, ncaa_err = _test_ncaa_connectivity(player)
+        if ncaa_ok:
+            return True, ""
+        return False, f"{err} | NCAA fallback: {ncaa_err}"
+
+    return False, err
+
+
+# ---------------------------------------------------------------------------
 # Main entry point
 # ---------------------------------------------------------------------------
 
