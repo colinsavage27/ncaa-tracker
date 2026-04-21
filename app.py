@@ -528,9 +528,20 @@ def delete_log(log_id: int):
 def _scheduler_loop() -> None:
     """Daemon thread: schedules and runs the nightly scrape+email job."""
     from scheduler import run_nightly_job
-    RUN_AT = os.environ.get("NIGHTLY_RUN_AT", "23:00")
-    schedule.every().day.at(RUN_AT).do(run_nightly_job)
-    logger.info("Scheduler thread ready — nightly job scheduled at %s UTC.", RUN_AT)
+    RUN_AT = os.environ.get("NIGHTLY_RUN_AT", "03:00")
+    # Normalize: pad single-digit hour so "3:00" → "03:00" (schedule lib requires HH:MM)
+    if re.match(r"^\d:\d{2}(:\d{2})?$", RUN_AT):
+        RUN_AT = "0" + RUN_AT
+    try:
+        schedule.every().day.at(RUN_AT).do(run_nightly_job)
+        logger.info("Scheduler thread ready — nightly job scheduled at %s UTC.", RUN_AT)
+    except Exception as exc:
+        fallback = "03:00"
+        logger.error(
+            "Invalid NIGHTLY_RUN_AT=%r (%s) — falling back to %s UTC.", RUN_AT, exc, fallback
+        )
+        schedule.every().day.at(fallback).do(run_nightly_job)
+        logger.info("Scheduler thread ready — nightly job scheduled at %s UTC (fallback).", fallback)
     while True:
         schedule.run_pending()
         time.sleep(30)

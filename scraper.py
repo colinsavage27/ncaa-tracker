@@ -315,11 +315,24 @@ class NCAAScraper(BasePlayerScraper):
     def _scrape_game_log(
         self, player: dict, ncaa_player_id: str, target_date: Optional[str] = None
     ) -> Optional[dict]:
-        # Step 1 — Load the player profile page
+        # Step 1 — Load the player profile page.
+        # ScraperAPI occasionally returns HTTP 200 with nearly-empty HTML
+        # (Akamai soft-challenge page that passes the status check but has no
+        # content).  Detect this by checking for 0 tables and retry up to 3x.
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
-        resp = _get(profile_url)
-        soup = BeautifulSoup(resp.text, "html.parser")
+        soup = None
+        for page_attempt in range(3):
+            resp = _get(profile_url)
+            soup = BeautifulSoup(resp.text, "html.parser")
+            if soup.find("table") or len(resp.text) > 5000:
+                break  # page looks real
+            wait = 20 * (page_attempt + 1)
+            logger.warning(
+                "Profile page for %s returned empty HTML (attempt %d/3) — retrying in %ds",
+                player["name"], page_attempt + 1, wait,
+            )
+            time.sleep(wait)
 
         # Step 2 — Try parsing game log directly from the profile page.
         # stats.ncaa.org renders the full game-by-game table on the profile
