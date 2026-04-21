@@ -15,6 +15,7 @@ import logging
 import re
 import time
 from abc import ABC, abstractmethod
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta
 from typing import Optional
 
@@ -53,7 +54,8 @@ SESSION.headers.update({
     )
 })
 
-REQUEST_DELAY = 2.0  # seconds between requests
+REQUEST_DELAY = 0.0  # No delay needed — all NCAA requests route through ScraperAPI,
+                     # which handles target-site rate limiting on its end.
 
 
 SCRAPERAPI_ULTRA = os.getenv("SCRAPERAPI_ULTRA", "false").lower() == "true"
@@ -75,11 +77,12 @@ def _scraperapi_url(target_url: str) -> str:
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
 
 
-def _get(url: str, retries: int = 4, **kwargs):
+def _get(url: str, retries: int = 3, **kwargs):
     """Fetch url via ScraperAPI (if key configured) or directly.
     Retries up to `retries` times on 500 errors (ScraperAPI transient failures).
-    Uses progressively longer waits: 15s, 30s, 45s, 60s."""
-    time.sleep(REQUEST_DELAY)
+    Uses progressively longer waits: 6s, 10s, 16s."""
+    if REQUEST_DELAY:
+        time.sleep(REQUEST_DELAY)
     if SCRAPERAPI_KEY:
         fetch_url = _scraperapi_url(url)
     else:
@@ -90,6 +93,7 @@ def _get(url: str, retries: int = 4, **kwargs):
         )
         fetch_url = url
 
+    _RETRY_WAITS = [6, 10, 16, 25]  # seconds before each retry attempt
     last_exc = None
     for attempt in range(1 + retries):
         try:
@@ -99,7 +103,7 @@ def _get(url: str, retries: int = 4, **kwargs):
         except requests.HTTPError as exc:
             last_exc = exc
             if exc.response is not None and exc.response.status_code == 500 and attempt < retries:
-                wait = 15 * (attempt + 1)
+                wait = _RETRY_WAITS[min(attempt, len(_RETRY_WAITS) - 1)]
                 logger.warning(
                     "ScraperAPI 500 for %s — retrying in %ds (attempt %d/%d)",
                     url, wait, attempt + 1, retries,
@@ -322,17 +326,19 @@ class NCAAScraper(BasePlayerScraper):
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
         soup = None
-        for page_attempt in range(3):
+        _empty_waits = [8, 12]  # retry delays when ScraperAPI returns empty page
+        for page_attempt in range(1 + len(_empty_waits)):
             resp = _get(profile_url)
             soup = BeautifulSoup(resp.text, "html.parser")
             if soup.find("table") or len(resp.text) > 5000:
                 break  # page looks real
-            wait = 20 * (page_attempt + 1)
-            logger.warning(
-                "Profile page for %s returned empty HTML (attempt %d/3) — retrying in %ds",
-                player["name"], page_attempt + 1, wait,
-            )
-            time.sleep(wait)
+            if page_attempt < len(_empty_waits):
+                wait = _empty_waits[page_attempt]
+                logger.warning(
+                    "Profile page for %s returned empty HTML (attempt %d/%d) — retrying in %ds",
+                    player["name"], page_attempt + 1, 1 + len(_empty_waits), wait,
+                )
+                time.sleep(wait)
 
         # Step 2 — Try parsing game log directly from the profile page.
         # stats.ncaa.org renders the full game-by-game table on the profile
@@ -348,14 +354,17 @@ class NCAAScraper(BasePlayerScraper):
         game_log_url = self._find_game_log_url(soup, ncaa_player_id)
 
         if not game_log_url:
-            ctl_id = self._discover_baseball_ctl_id()
-            if ctl_id:
-                # Use the standard /player/game_log?... format
-                game_log_url = (
-                    f"{NCAA_BASE}/player/game_log"
-                    f"?game_sport_year_ctl_id={ctl_id}&player_id={ncaa_player_id}"
-                )
-                logger.info("Using discovered ctl_id=%s for %s", ctl_id, player["name"])
+            # Only attempt ctl_id discovery if the profile page loaded real content.
+            # If it was empty (0 tables), discovery will also fail — skip it.
+            profile_has_content = soup and (soup.find("table") or len(soup.get_text(strip=True)) > 200)
+            if profile_has_content:
+                ctl_id = self._discover_baseball_ctl_id()
+                if ctl_id:
+                    game_log_url = (
+                        f"{NCAA_BASE}/player/game_log"
+                        f"?game_sport_year_ctl_id={ctl_id}&player_id={ncaa_player_id}"
+                    )
+                    logger.info("Using discovered ctl_id=%s for %s", ctl_id, player["name"])
 
         if not game_log_url:
             logger.warning(
@@ -381,7 +390,9 @@ class NCAAScraper(BasePlayerScraper):
         if NCAAScraper._cached_ctl_id:
             return NCAAScraper._cached_ctl_id
         try:
-            resp = _get(f"{NCAA_BASE}/rankings/national_team_statistics")
+            # Single attempt only — this is a speculative fallback; if it 500s,
+            # fail fast rather than burning retries on a secondary URL.
+            resp = _get(f"{NCAA_BASE}/rankings/national_team_statistics", retries=0)
             raw = str(BeautifulSoup(resp.text, "html.parser"))
             for pattern in [
                 r"game_sport_year_ctl_id[^0-9]+(\d{4,6})",
@@ -1246,9 +1257,13 @@ def _scrape_player_with_fallback(player: dict) -> tuple[Optional[dict], str]:
 
 def scrape_all_players() -> int:
     """
-    Scrape the latest game for every player in the DB.
+    Scrape the latest game for every player in the DB — in parallel.
     Writes results to games_log. Updates scrape_status on persistent failures.
     Returns the number of new game entries saved.
+
+    Workers: up to 5 players scraped concurrently.  Each worker is mostly
+    waiting on ScraperAPI network I/O, so threading gives near-linear speedup.
+    SQLite WAL mode (enabled in database.init_db) handles concurrent writes.
     """
     players = db.get_all_players()
     if not players:
@@ -1256,21 +1271,34 @@ def scrape_all_players() -> int:
         return 0
 
     saved = 0
-    for player in players:
-        stats, error = _scrape_player_with_fallback(player)
-        if stats is None:
-            if error:
-                db.update_player_scrape_status(player["id"], "failed", error)
-                logger.info("  -> Scrape failed for %s: %s", player["name"], error)
-            else:
-                logger.info("  -> No game to report for %s", player["name"])
-            continue
+    max_workers = min(5, len(players))
 
-        game_date = stats.get("game_date", date.today().isoformat())
-        db.upsert_game_log(player["id"], game_date, stats)
-        db.update_player_scrape_status(player["id"], "verified", "")
-        logger.info("  -> Saved stats for %s on %s", player["name"], game_date)
-        saved += 1
+    with ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="scrape") as pool:
+        future_to_player = {
+            pool.submit(_scrape_player_with_fallback, p): p for p in players
+        }
+        for future in as_completed(future_to_player):
+            player = future_to_player[future]
+            try:
+                stats, error = future.result()
+            except Exception as exc:
+                logger.error("Unexpected scrape error for %s: %s", player["name"], exc)
+                db.update_player_scrape_status(player["id"], "failed", str(exc))
+                continue
+
+            if stats is None:
+                if error:
+                    db.update_player_scrape_status(player["id"], "failed", error)
+                    logger.info("  -> Scrape failed for %s: %s", player["name"], error)
+                else:
+                    logger.info("  -> No game to report for %s", player["name"])
+                continue
+
+            game_date = stats.get("game_date", date.today().isoformat())
+            db.upsert_game_log(player["id"], game_date, stats)
+            db.update_player_scrape_status(player["id"], "verified", "")
+            logger.info("  -> Saved stats for %s on %s", player["name"], game_date)
+            saved += 1
 
     logger.info("Scraping complete. %d new/updated game entries saved.", saved)
     return saved

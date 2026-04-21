@@ -21,9 +21,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH, timeout=15)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA journal_mode=WAL")   # allows concurrent reads + one writer
+    conn.execute("PRAGMA busy_timeout=10000")  # wait up to 10s if DB is locked
     return conn
 
 
