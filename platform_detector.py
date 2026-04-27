@@ -518,8 +518,23 @@ def _name_to_slug(name: str) -> str:
 def search_ncaa_player_id(name: str, school: str) -> Optional[str]:
     """
     Search DuckDuckGo for a player's stats.ncaa.org player ID.
+
+    For each result that contains an NCAA player URL, the player's last name is
+    checked against the result text before the ID is returned.  This prevents the
+    wrong player's ID from being returned when DuckDuckGo surfaces an unrelated
+    result at the top (e.g. returning Ace Reese's ID when looking up Gabe Gaeckle).
+
     Returns the numeric player ID string or None if not found.
     """
+    from bs4 import BeautifulSoup
+
+    # We validate against the player's last name — it must appear somewhere in
+    # the DDG result block that contains the NCAA URL.
+    name_parts = [p.lower() for p in name.strip().split() if p]
+    last_name = name_parts[-1] if name_parts else ""
+
+    id_pattern = re.compile(r'stats\.ncaa\.org/players/(\d+)', re.IGNORECASE)
+
     for query in [
         f'site:stats.ncaa.org "{name}" baseball',
         f'site:stats.ncaa.org {name} {school} baseball',
@@ -527,14 +542,35 @@ def search_ncaa_player_id(name: str, school: str) -> Optional[str]:
         ddg_url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
         try:
             resp = _fetch(ddg_url, timeout=15)
-            html = resp.text
-            pattern = re.compile(r'stats\.ncaa\.org/players/(\d+)', re.IGNORECASE)
-            matches = pattern.findall(html)
-            if matches:
-                logger.info("Found NCAA player ID %s for %s via search", matches[0], name)
-                return matches[0]
+            soup = BeautifulSoup(resp.text, "html.parser")
+
+            # Walk each DDG result block; validate the player name before accepting the ID.
+            for result_div in soup.find_all("div", class_=re.compile(r"result")):
+                result_html = str(result_div)
+                id_match = id_pattern.search(result_html)
+                if not id_match:
+                    continue
+
+                player_id = id_match.group(1)
+                result_text = result_div.get_text(" ", strip=True).lower()
+
+                # Require the player's last name to appear in the result block.
+                if last_name and last_name not in result_text:
+                    logger.debug(
+                        "NCAA ID %s found but last name '%s' not in result — skipping",
+                        player_id, last_name,
+                    )
+                    continue
+
+                logger.info(
+                    "Found NCAA player ID %s for %s (name validated in result text)",
+                    player_id, name,
+                )
+                return player_id
+
         except Exception as exc:
             logger.warning("NCAA player ID search failed for %s: %s", name, exc)
+
     logger.info("Could not find NCAA player ID for %s at %s", name, school)
     return None
 

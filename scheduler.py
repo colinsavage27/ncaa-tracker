@@ -28,6 +28,7 @@ logger = logging.getLogger(__name__)
 import database as db
 import scraper as sc
 import emailer as em
+import d1baseball
 
 
 # ---------------------------------------------------------------------------
@@ -40,19 +41,39 @@ def run_nightly_job(target_date: str | None = None) -> None:
     logger.info("Nightly job starting. Target date: %s", target_date or "yesterday")
     logger.info("=" * 60)
 
+    # 0 — Clear D1Baseball cache so season stats are fetched fresh each run
+    d1baseball.clear_cache()
+
     # 1 — Scrape
+    failures: list[dict] = []
     try:
         saved = sc.scrape_all_players()
         logger.info("Scraping done. %d game entries saved.", saved)
+        # Collect players whose scrape_status is 'failed' after the job
+        for player in db.get_all_players():
+            if player.get("scrape_status") == "failed":
+                failures.append({
+                    "name": player["name"],
+                    "school": player["school"],
+                    "error": player.get("scrape_error") or "Unknown error",
+                })
     except Exception as exc:
         logger.exception("Scraping failed with unexpected error: %s", exc)
 
-    # 2 — Email
+    # 2 — Email agents
     try:
         sent = em.send_nightly_emails(target_date=target_date)
         logger.info("Email job done. %d email(s) sent.", sent)
     except Exception as exc:
         logger.exception("Email job failed with unexpected error: %s", exc)
+
+    # 3 — Alert admin of any scrape failures
+    if failures:
+        logger.warning("%d player(s) had scrape errors — sending alert.", len(failures))
+        try:
+            em.send_scrape_error_alert(failures)
+        except Exception as exc:
+            logger.error("Could not send scrape error alert: %s", exc)
 
     logger.info("Nightly job finished.")
 

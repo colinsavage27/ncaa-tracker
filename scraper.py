@@ -12,6 +12,7 @@ the correct scraper based on a source tag stored in the player record
 """
 
 import logging
+import random
 import re
 import time
 from abc import ABC, abstractmethod
@@ -61,13 +62,18 @@ REQUEST_DELAY = 0.0  # No delay needed — all NCAA requests route through Scrap
 SCRAPERAPI_ULTRA = os.getenv("SCRAPERAPI_ULTRA", "false").lower() == "true"
 
 
-def _scraperapi_url(target_url: str, **extra_params) -> str:
+def _scraperapi_url(target_url: str, session_id: Optional[int] = None, **extra_params) -> str:
     """Wrap a target URL for delivery through ScraperAPI with JS rendering.
 
     Set SCRAPERAPI_ULTRA=true in .env to enable Ultra Premium mode, which
     is required for Akamai-protected sites like stats.ncaa.org.
     Pass extra_params to override or extend the ScraperAPI query string
     (e.g. country_code='us', device_type='mobile') for retry variation.
+
+    session_id pins all requests to the same proxy IP and preserves cookies
+    across calls for the same player.  Akamai's _abck cookie (set on the
+    first successful touch) is then re-used on subsequent requests, avoiding
+    a fresh challenge each time.
     """
     params = {
         "api_key": SCRAPERAPI_KEY,
@@ -75,6 +81,8 @@ def _scraperapi_url(target_url: str, **extra_params) -> str:
     }
     if SCRAPERAPI_ULTRA:
         params["ultra_premium"] = "true"
+    if session_id is not None:
+        params["session_number"] = session_id
     params.update(extra_params)  # caller controls render=true/false per attempt
     return f"{SCRAPERAPI_ENDPOINT}?{urlencode(params)}"
 
@@ -90,10 +98,10 @@ def _scraperapi_url(target_url: str, **extra_params) -> str:
 # Akamai can't fingerprint what isn't there.  If it blocks us anyway (empty
 # page / 500), we escalate to render=true on subsequent attempts.
 #
-# Attempt 0 — render=false, no Chrome  (fast, undetectable, ~2s)
-# Attempt 1 — render=true, standard ultra premium  (headless Chrome fallback)
-# Attempt 2 — render=true, US residential proxy    (different proxy pool)
-# Attempt 3 — render=true, US residential, mobile UA  (different fingerprint)
+# Attempt 0 — render=false, no Chrome       (fast, ~2s; datacenter IP)
+# Attempt 1 — render=true, ultra premium    (headless Chrome + residential IP)
+# Attempt 2 — render=true, US residential   (different proxy pool)
+# Attempt 3 — render=true, US mobile        (different fingerprint)
 _SCRAPERAPI_RETRY_PARAMS: list[dict] = [
     {"render": "false"},
     {"render": "true"},
@@ -102,11 +110,17 @@ _SCRAPERAPI_RETRY_PARAMS: list[dict] = [
 ]
 
 
-def _get(url: str, retries: int = 3, **kwargs):
+def _get(url: str, retries: int = 3, attempt_offset: int = 0,
+         session_id: Optional[int] = None, **kwargs):
     """Fetch url, escalating through ScraperAPI strategies on each 500 or empty page.
 
-    Attempt 0 is render=false (no headless Chrome — avoids Akamai fingerprint).
-    Subsequent attempts escalate to render=true with varying proxy params.
+    attempt_offset lets the caller start mid-ladder (e.g. pass attempt_offset=1
+    to skip render=false and go straight to render=true on the first try).
+    Used by the empty-page retry loop so each outer retry escalates strategy
+    rather than repeating the same blocked approach.
+
+    session_id (when set) pins the ScraperAPI session so Akamai cookies from
+    the first request are reused on subsequent requests for the same player.
     """
     if REQUEST_DELAY:
         time.sleep(REQUEST_DELAY)
@@ -114,11 +128,12 @@ def _get(url: str, retries: int = 3, **kwargs):
     _RETRY_WAITS = [6, 10, 16, 25]
     last_exc = None
     for attempt in range(1 + retries):
+        ladder_pos = min(attempt + attempt_offset, len(_SCRAPERAPI_RETRY_PARAMS) - 1)
         if SCRAPERAPI_KEY:
-            extra = _SCRAPERAPI_RETRY_PARAMS[min(attempt, len(_SCRAPERAPI_RETRY_PARAMS) - 1)]
-            fetch_url = _scraperapi_url(url, **extra)
-            if attempt > 0:
-                logger.info("ScraperAPI retry %d with params %s", attempt, extra)
+            extra = _SCRAPERAPI_RETRY_PARAMS[ladder_pos]
+            fetch_url = _scraperapi_url(url, session_id=session_id, **extra)
+            if attempt > 0 or attempt_offset > 0:
+                logger.info("ScraperAPI fetch ladder=%d params=%s", ladder_pos, extra)
         else:
             if attempt == 0:
                 logger.warning(
@@ -228,14 +243,21 @@ PITCHER_STAT_COLS = {
 
 def _safe_float(val: str) -> float:
     try:
-        return float(val.strip())
+        # Strip footnote markers (e.g. "1/" in NCAA pitcher tables) keeping
+        # digits, decimal point, and leading minus only.
+        cleaned = re.sub(r"[^0-9.\-]", "", str(val).strip())
+        return float(cleaned) if cleaned else 0.0
     except (ValueError, AttributeError):
         return 0.0
 
 
 def _safe_int(val: str) -> int:
     try:
-        return int(str(val).strip().split(".")[0])
+        # Strip footnote markers (e.g. "1/" in NCAA pitcher tables) and any other
+        # non-numeric characters before parsing.  Keep leading minus for negatives.
+        raw = str(val).strip().split(".")[0]
+        cleaned = re.sub(r"[^0-9\-]", "", raw)
+        return int(cleaned) if cleaned else 0
     except (ValueError, AttributeError):
         return 0
 
@@ -367,44 +389,53 @@ class NCAAScraper(BasePlayerScraper):
         # Step 1 — Load the player profile page.
         # ScraperAPI occasionally returns HTTP 200 with nearly-empty HTML
         # (Akamai soft-challenge page that passes the status check but has no
-        # content).  Detect this by checking for 0 tables and retry up to 2x
-        # (skipped entirely in quick mode).
+        # content).  Detect this by checking for 0 tables and retry up to 2x.
+        #
+        # Session ID: all requests for this player share one ScraperAPI session
+        # so Akamai's _abck cookie (earned on the first successful touch) is
+        # reused on the second request — no fresh challenge needed.
+        #
+        # attempt_offset: each empty-page retry steps one rung up the ScraperAPI
+        # escalation ladder (render=false → render=true → render=true+us → mobile)
+        # instead of repeating the same blocked strategy.
         profile_url = f"{NCAA_BASE}/players/{ncaa_player_id}"
         logger.info("Fetching NCAA profile: %s", profile_url)
-        # quick=True  → 1 retry (render=false first, then render=true): ~2 attempts max
-        # quick=False → 3 retries (full escalation): background nightly job
+
+        session_id = random.randint(1, 999999)  # unique per player scrape
+
+        # quick=True  → 1 retry (render=false first, then render=true)
+        # quick=False → 3 retries (full escalation ladder)
         _get_retries  = 1 if quick else 3
-        _empty_waits  = [] if quick else [8, 12]  # retry delays for empty-page responses
+        _empty_waits  = [] if quick else [8, 12]
+
         soup = None
         for page_attempt in range(1 + len(_empty_waits)):
-            resp = _get(profile_url, retries=_get_retries)
+            resp = _get(profile_url, retries=_get_retries,
+                        attempt_offset=page_attempt, session_id=session_id)
             soup = BeautifulSoup(resp.text, "html.parser")
             if soup.find("table") or len(resp.text) > 5000:
                 break  # page looks real
             if page_attempt < len(_empty_waits):
                 wait = _empty_waits[page_attempt]
                 logger.warning(
-                    "Profile page for %s returned empty HTML (attempt %d/%d) — retrying in %ds",
+                    "Profile page for %s returned empty HTML (attempt %d/%d) "
+                    "— escalating to next ScraperAPI strategy in %ds",
                     player["name"], page_attempt + 1, 1 + len(_empty_waits), wait,
                 )
                 time.sleep(wait)
 
         # Step 2 — Try parsing game log directly from the profile page.
-        # stats.ncaa.org renders the full game-by-game table on the profile
-        # page itself (visible in the "Game By Game" section), so we can often
-        # skip the second ScraperAPI call entirely.
         result = self._parse_most_recent_game(soup, player, target_date=target_date)
         if result is not None:
             logger.info("Parsed game log from profile page for %s", player["name"])
             return result
 
         # Step 3 — Profile page didn't have the table; find and follow the
-        # dedicated game-log tab URL.
+        # dedicated game-log tab URL.  Pass the same session_id so Akamai
+        # cookies earned in Step 1 carry over to this second request.
         game_log_url = self._find_game_log_url(soup, ncaa_player_id)
 
         if not game_log_url:
-            # Only attempt ctl_id discovery if the profile page loaded real content.
-            # If it was empty (0 tables), discovery will also fail — skip it.
             profile_has_content = soup and (soup.find("table") or len(soup.get_text(strip=True)) > 200)
             if profile_has_content:
                 ctl_id = self._discover_baseball_ctl_id()
@@ -424,7 +455,7 @@ class NCAAScraper(BasePlayerScraper):
             return None
 
         logger.info("Fetching game log page: %s", game_log_url)
-        resp = _get(game_log_url)
+        resp = _get(game_log_url, session_id=session_id)
         soup = BeautifulSoup(resp.text, "html.parser")
         return self._parse_most_recent_game(soup, player, target_date=target_date)
 
@@ -579,10 +610,18 @@ class NCAAScraper(BasePlayerScraper):
             )
             return None
 
-        headers = [
-            th.get_text(strip=True).lower()
-            for th in table.find_all("th")
-        ]
+        # Pick the header row with the most <th> elements.
+        # Some NCAA tables have a group header row first (e.g. a single <th
+        # colspan="20">Pitching Stats</th>) followed by the real column headers.
+        # Taking the first <tr> with any <th> would grab the group row and give
+        # us only 1 header, breaking all column mapping.  The actual column
+        # header row always has more cells, so max() picks it correctly.
+        all_header_rows = [r for r in table.find_all("tr") if r.find("th")]
+        header_row = max(all_header_rows, key=lambda r: len(r.find_all("th")), default=None)
+        headers = (
+            [th.get_text(strip=True).lower() for th in header_row.find_all("th")]
+            if header_row else []
+        )
         # Fallback: headers from first row <td>s if no <th> found
         if not headers:
             first_row = table.find("tr")
@@ -1265,9 +1304,55 @@ def test_player_connectivity(player: dict) -> tuple[bool, str]:
 # ---------------------------------------------------------------------------
 
 
+def _auto_discover_sidearm(player: dict) -> Optional[str]:
+    """
+    Auto-discover the Sidearm roster URL for an NCAA-primary player.
+
+    Calls platform_detector.auto_detect() for the player's school, finds the player's
+    URL on the school's Sidearm roster, saves it to the DB (sidearm_schedule_url column),
+    and returns the URL string.  Returns None if the school or player isn't on Sidearm.
+
+    This runs at most once per player — the saved URL is reused on subsequent nightly
+    runs without repeating the discovery step.
+    """
+    import platform_detector as pd
+
+    name = player["name"]
+    school = player["school"]
+    player_id = player["id"]
+
+    logger.info("Auto-discovering Sidearm URL for %s @ %s ...", name, school)
+    try:
+        result = pd.auto_detect(name, school)
+        if result.success and result.player_url and result.source in ("sidearm", "sidearm_legacy"):
+            logger.info(
+                "Discovered Sidearm URL for %s: %s (platform=%s)",
+                name, result.player_url, result.source,
+            )
+            db.update_player_sidearm_url(player_id, result.player_url)
+            return result.player_url
+        else:
+            logger.info(
+                "Sidearm auto-discovery: no Sidearm URL found for %s (platform=%s, success=%s)",
+                name, result.platform, result.success,
+            )
+    except Exception as exc:
+        logger.warning("Sidearm auto-discovery failed for %s: %s", name, exc)
+    return None
+
+
 def _scrape_player_with_fallback(player: dict) -> tuple[Optional[dict], str]:
     """
-    Try primary scraper, fall back to NCAA via ScraperAPI if it fails.
+    Try primary scraper, with additional fallback layers.
+
+    For NCAA-primary players whose scrape returns nothing:
+      → Check if the school's Sidearm site has the stats (game log posted
+        faster than NCAA's server-side update).  The Sidearm URL is
+        auto-discovered on the first attempt and saved for future runs.
+
+    For Sidearm-primary players that fail:
+      → Fall back to the NCAA Stats scraper using the stored ncaa_player_id.
+
     Returns (stats_or_None, error_message).
     """
     source = player.get("source", "ncaa")
@@ -1275,8 +1360,9 @@ def _scrape_player_with_fallback(player: dict) -> tuple[Optional[dict], str]:
     school = player["school"]
     ncaa_id = player.get("ncaa_player_id", "")
 
-    # Try primary scraper
+    # ── Primary scrape ────────────────────────────────────────────────────
     primary_error = ""
+    stats = None
     try:
         scraper = get_scraper(source)
         logger.info("Scraping %s [%s] via %s ...", name, school, scraper.source_name)
@@ -1290,7 +1376,45 @@ def _scrape_player_with_fallback(player: dict) -> tuple[Optional[dict], str]:
         primary_error = str(exc)
         logger.error("Primary scraper error for %s: %s", name, exc)
 
-    # Fall back to NCAA scraper if we have a player ID and primary source is not NCAA
+    # ── Sidearm fallback for NCAA-primary players ─────────────────────────
+    # When NCAA returns nothing (game not yet posted / date mismatch),
+    # the school's Sidearm site sometimes has the box score sooner.
+    if source == "ncaa" and stats is None:
+        sidearm_url = player.get("sidearm_schedule_url") or ""
+
+        if not sidearm_url:
+            # First time this player has no NCAA hit → discover the Sidearm URL
+            sidearm_url = _auto_discover_sidearm(player) or ""
+
+        if sidearm_url:
+            player_copy = dict(player)
+            player_copy["sidearm_schedule_url"] = sidearm_url
+            logger.info(
+                "Trying Sidearm fallback for %s @ %s (%s)",
+                name, school, sidearm_url,
+            )
+            # Try nextgen first, then legacy — one will raise ValueError if unsupported
+            for sidearm_src in ("sidearm", "sidearm_legacy"):
+                try:
+                    sidearm_scraper = get_scraper(sidearm_src)
+                    stats = sidearm_scraper.fetch_latest_game(player_copy)
+                    if stats is not None:
+                        logger.info(
+                            "Sidearm fallback (%s) returned stats for %s",
+                            sidearm_src, name,
+                        )
+                        return stats, ""
+                    # Sidearm returned None → no game today; no point trying legacy
+                    break
+                except ValueError:
+                    continue  # This scraper not registered; try next
+                except Exception as exc:
+                    logger.warning(
+                        "Sidearm fallback (%s) error for %s: %s", sidearm_src, name, exc
+                    )
+                    break
+
+    # ── NCAA fallback for Sidearm-primary players ─────────────────────────
     if ncaa_id and source != "ncaa":
         logger.info("Trying NCAA fallback for %s (id=%s)", name, ncaa_id)
         try:

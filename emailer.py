@@ -13,6 +13,7 @@ from datetime import date, timedelta
 from dotenv import load_dotenv
 
 import database as db
+import d1baseball
 
 load_dotenv()
 logger = logging.getLogger(__name__)
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 EMAIL_FROM = os.getenv("GMAIL_USER", "")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "NCAA Player Tracker")
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY", "")
+ADMIN_EMAIL = os.getenv("ADMIN_EMAIL", EMAIL_FROM)  # defaults to sender if not set
 
 
 # ---------------------------------------------------------------------------
@@ -58,6 +60,30 @@ def _format_score_line(stats: dict, player: dict) -> str:
     return f"{team} {team_score} — {opponent} {opp_score}"
 
 
+def _format_season_line(player_name: str, school: str, position: str) -> str:
+    """
+    Fetch season stats from D1Baseball.com and format as a plain-text line.
+    Returns an empty string if stats are unavailable.
+    """
+    try:
+        s = d1baseball.get_season_stats(player_name, school, position)
+    except Exception as exc:
+        logger.warning("d1baseball lookup failed for %s: %s", player_name, exc)
+        return ""
+    if not s:
+        return ""
+    if position == "pitcher":
+        return (
+            f"Season: {s['w']}-{s['l']}, {s['era']} ERA, "
+            f"{s['ip']} IP, {s['k']} K, {s['bb']} BB, {s['whip']} WHIP"
+        )
+    else:
+        return (
+            f"Season: {s['ba']} BA / {s['obp']} OBP / {s['slg']} SLG  "
+            f"({s['hr']} HR, {s['rbi']} RBI, {s['bb']} BB, {s['k']} K)"
+        )
+
+
 def format_player_block(player: dict, stats: dict) -> str:
     """Return a plain-text block for one player."""
     header = f"{player['player_name']} — {player['school']}"
@@ -66,7 +92,13 @@ def format_player_block(player: dict, stats: dict) -> str:
     else:
         stat_line = _format_hitter_line(stats)
     score_line = _format_score_line(stats, player)
-    return f"{header}\n{stat_line}\n{score_line}"
+    season_line = _format_season_line(
+        player["player_name"], player["school"], player["position"]
+    )
+    parts = [header, stat_line, score_line]
+    if season_line:
+        parts.append(season_line)
+    return "\n".join(parts)
 
 
 def build_email_body(agent_name: str, player_rows: list[dict], report_date: str) -> str:
@@ -108,12 +140,19 @@ def build_html_email_body(agent_name: str, player_rows: list[dict], report_date:
 
         score_line = _format_score_line(stats, row)
 
+        season_line = _format_season_line(player_name, school, position)
+        season_html = (
+            f'<span style="color:#444; font-size:12px; font-style:italic;">'
+            f'{season_line}</span><br>'
+            if season_line else ""
+        )
         blocks.append(f"""
         <div style="border-bottom:1px solid #ddd; padding:12px 0;">
           <strong style="font-size:15px;">{player_name}</strong>
           <span style="color:#555;"> — {school}</span><br>
           <span style="font-family:monospace; font-size:13px;">{stat_line}</span><br>
-          <span style="color:#666; font-size:12px;">{score_line}</span>
+          <span style="color:#666; font-size:12px;">{score_line}</span><br>
+          {season_html}
         </div>
         """)
 
@@ -243,3 +282,51 @@ def send_nightly_emails(target_date: str | None = None) -> int:
 
     logger.info("Nightly email job complete. %d email(s) sent.", emails_sent)
     return emails_sent
+
+
+def send_scrape_error_alert(failures: list[dict]) -> None:
+    """
+    Email the admin when one or more player scrapes fail during the nightly job.
+
+    Each item in failures is a dict with keys: name, school, error.
+    Set ADMIN_EMAIL in Railway env vars to route alerts (defaults to GMAIL_USER).
+    """
+    if not failures or not ADMIN_EMAIL:
+        return
+
+    date_str = date.today().isoformat()
+    subject = f"⚠️ Scrape errors — {len(failures)} player(s) failed ({date_str})"
+
+    rows_plain = "\n".join(
+        f"  • {f['name']} ({f['school']}): {f['error']}" for f in failures
+    )
+    rows_html = "\n".join(
+        f"<li><strong>{f['name']}</strong> ({f['school']})<br>"
+        f"<span style='color:#c0392b; font-size:12px;'>{f['error']}</span></li>"
+        for f in failures
+    )
+
+    plain_body = (
+        f"The nightly scrape on {date_str} encountered errors for "
+        f"{len(failures)} player(s):\n\n{rows_plain}\n\n"
+        "Check the Railway deploy logs for full details.\n"
+        "Use the Fix panel on the Players page to correct any bad NCAA IDs."
+    )
+
+    html_body = f"""
+    <html><body style="font-family:Arial,sans-serif; max-width:600px; margin:auto; color:#222;">
+      <h2 style="color:#c0392b;">⚠️ Scrape Errors — {date_str}</h2>
+      <p>The nightly scrape encountered errors for <strong>{len(failures)}</strong> player(s):</p>
+      <ul style="line-height:1.8;">{rows_html}</ul>
+      <p style="font-size:12px; color:#666;">
+        Check Railway deploy logs for full details.<br>
+        Use the <strong>Fix</strong> panel on the Players page to correct bad NCAA IDs.
+      </p>
+    </body></html>
+    """
+
+    try:
+        _send_email(ADMIN_EMAIL, subject, plain_body, html_body)
+        logger.info("Scrape error alert sent to %s (%d failure(s))", ADMIN_EMAIL, len(failures))
+    except Exception as exc:
+        logger.error("Failed to send scrape error alert: %s", exc)

@@ -193,6 +193,14 @@ def update_player_source(player_id: int, source: str):
         )
 
 
+def update_player_sidearm_url(player_id: int, sidearm_url: str):
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE players SET sidearm_schedule_url = ? WHERE id = ?",
+            (sidearm_url, player_id),
+        )
+
+
 # ---------------------------------------------------------------------------
 # Games log queries
 # ---------------------------------------------------------------------------

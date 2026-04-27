@@ -580,7 +580,7 @@ def delete_log(log_id: int):
 def _scheduler_loop() -> None:
     """Daemon thread: schedules and runs the nightly scrape+email job."""
     from scheduler import run_nightly_job
-    RUN_AT = os.environ.get("NIGHTLY_RUN_AT", "03:00")
+    RUN_AT = os.environ.get("NIGHTLY_RUN_AT", "13:00")
     # Normalize: pad single-digit hour so "3:00" → "03:00" (schedule lib requires HH:MM)
     if re.match(r"^\d:\d{2}(:\d{2})?$", RUN_AT):
         RUN_AT = "0" + RUN_AT
